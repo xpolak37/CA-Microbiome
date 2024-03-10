@@ -248,6 +248,31 @@ recall <- function(ps_object_filt, zymo_taxa){
 
 # Biopsy samples
 
+For each pipeline setting, the following is done:
+
+-   Loading asv table and taxa table
+
+-   Visualization of read counts before and after bioinformatics
+    processing
+
+-   Visualization of taxonomic composition (normalized and filtered data
+    without transformation)
+
+-   Merging data at genus level
+
+-   Ordination analysis - Aitchison distance + PERMANOVA
+
+-   Ordination analysis - Bray Curtis distance + PERMANOVA
+
+-   Alpha diversity - Shannon index and Inverse Simpson index
+
+-   Univariate analysis using Aldex2
+
+PERMANOVA p-values of Aitchison distance are saved continually and
+output when processing the results at the end of the report.
+Differentially abundant taxa are continually saved in a table that is
+also outputted at the end of the report.
+
 ```{r}
 input_numbers <- read.csv("data/input_reads.csv", sep=",", row.names = 1)
 rownames(input_numbers) <- regmatches(rownames(input_numbers), regexpr("(run\\d+_\\d+)", rownames(input_numbers)))
@@ -370,8 +395,9 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
   labs(title="PCoA on Bray-Curtis")
 ```
 
-ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
-diversity.
+ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -482,7 +508,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_dadas12_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -531,6 +559,8 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
 ```
 
 ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -641,7 +671,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_dadas14_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -689,8 +721,9 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
   labs(title="PCoA on Bray-Curtis")
 ```
 
-ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
-diversity.
+ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -827,7 +860,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_vsearchd_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -876,8 +911,9 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
   labs(title="PCoA on Bray-Curtis")
 ```
 
-ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
-diversity.
+ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -1066,6 +1102,8 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
 
 ALPHA DIVERSITY
 
+Mann Whitney showed no significant difference in alpha diversity.
+
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
 richness <- estimate_richness(genus_object, measures = alpha_meas)
@@ -1201,7 +1239,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_vsearchs9_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -1250,6 +1290,8 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
 ```
 
 ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -1364,7 +1406,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_vsearchd_idtaxa_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -1412,8 +1456,9 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
   labs(title="PCoA on Bray-Curtis")
 ```
 
-ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
-diversity.
+ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -1526,7 +1571,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_vsearchs6_idtaxa_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -1574,8 +1621,9 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
   labs(title="PCoA on Bray-Curtis")
 ```
 
-ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
-diversity.
+ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -1688,7 +1736,9 @@ genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa
 genus_vsearchs9_idtaxa_object <- genus_object
 ```
 
-ORDINATION PERMANOVA revealed a significant difference between groups.
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
 
 ```{r}
 # aitchison
@@ -1736,8 +1786,9 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
   labs(title="PCoA on Bray-Curtis")
 ```
 
-ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
-diversity.
+ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -1901,6 +1952,8 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
 
 ALPHA DIVERSITY
 
+Mann Whitney showed no significant difference in alpha diversity.
+
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
 richness <- estimate_richness(genus_object, measures = alpha_meas)
@@ -2062,6 +2115,8 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
 
 ALPHA DIVERSITY
 
+Mann Whitney showed no significant difference in alpha diversity.
+
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
 richness <- estimate_richness(genus_object, measures = alpha_meas)
@@ -2222,6 +2277,8 @@ ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
 ```
 
 ALPHA DIVERSITY
+
+Mann Whitney showed no significant difference in alpha diversity.
 
 ```{r}
 alpha_meas = c("Shannon", "InvSimpson")
@@ -2500,7 +2557,7 @@ matrix_data <- sapply(list_core, function(x) {
 # Convert the matrix to a data frame
 df <- as.data.frame(matrix_data)
 
-pheatmap(df, cluster_rows = TRUE, cluster_cols = TRUE)
+pheatmap(df, cluster_rows = TRUE, cluster_cols = FALSE)
 
 print(sum(apply(df,1,sum) == 12)/nrow(df))
 
