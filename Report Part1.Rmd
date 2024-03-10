@@ -1,0 +1,3672 @@
+---
+title: Comparative Analysis of Diverse Bioinformatics Pipeline Configurations based on Mock Communities and Biopsy samples (Part 1)
+author: Petra Polakovičová
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+
+# Introduction
+
+The research on the human microbiome has gained significant popularity over the past couple of years across both scientific and public communities. This area has revealed considerable knowledge, mainly thanks to next-generation sequencing. Even though technology possibilities evolve faster than ever, and there is an enormous amount of publicly available data, there are not yet precise procedures, methods, and bioinformatics tools to work accurately enough with microbiome data, and there are no standardized recommendations for bioinformatics pipelines to assess the most accurate results.
+
+Here, we demonstrate the potential inaccuracies that can arise from various bioinformatics processing of amplicon 16S RNA sequencing data by performing a comparative analysis of diverse pipeline configurations using mock community samples and biological material originating from biopsy samples obtained during regular colonoscopy from patients with primary sclerosing cholangitis.
+
+## Dataset
+
+This study is based on data from the research on the pathology of primary sclerosing cholangitis (PSC) - see Part 2. The biological material was obtained during routine protocolary colonoscopies from patients who had undergone liver transplantation for PSC and regularly attended follow-up visits at IKEM. The study was performed according to the Declaration of Helsinki, including the changes accepted during the 59th WMA General Assembly, and approved by the Joint Ethics Committee of IKEM and Thomayer Hospital. All patients provided dedicated informed consent.
+
+In addition, mock community samples (ZymoBIOMICS Microbial Community DNA Standard) were used as internal standards. A dataset of 62 samples was created, comprising 22 internal standards, 20 cecum biopsy samples from patients who underwent liver transplantation for PSC and did not develop recurrence and 20 control samples of cecum biopsy of patients who underwent liver transplantation due to alcohol use disorder (AUD).
+
+**Part 1** refers to the mock community analysis alongside with negative control samples, to check to what degree there is contamination in individual libraries.
+
+**Part 2** refers to the analysis of real biopsy samples.
+
+## Bioinformatics processing
+
+All samples underwent initial quality checks using FastQC v0.11.9 in combination with MultiQC v1.12. Next, primers were trimmed using CutAdapt v3.5, with any untrimmed reads discarded. Regarding bioinformatics processing, 28 different parameter (see tables below) settings across three pipelines for reads denoising, namely DADA2, VSEARCH-UNOISE3, and Deblur, were employed to process the data - see individual sections for more details.
+
+```{r}
+library(openxlsx)
+dada2_settings <- read.xlsx("combinations_settings.xlsx",sheet = "dada_combinations",rowNames = TRUE)
+dada2_settings
+```
+
+```{r}
+vsearch_settings <- read.xlsx("combinations_settings.xlsx",sheet = "vsearch combinations",rowNames = TRUE)
+vsearch_settings
+```
+
+```{r}
+deblur_settings <- read.xlsx("combinations_settings.xlsx",sheet = "deblur", rowNames = FALSE)
+deblur_settings
+```
+
+## Statistical methods
+
+The whole analysis was performed on the genus taxonomic level.
+
+**Part 1**
+
+All mock community samples processed with different pipelines were compared to the reference relative abundance of ZymoBIOMICS Microbial Community DNA Standard.
+
+The average precision and recall were calculated for each pipeline setting to quantify the accurately detected taxa. The Bray-Curtis distance was computed using vegan v2.6.4 and Phyloseq v1.46.0 to compare the relative abundance numbers. Results were plotted using ggplot2 v3.4.4.
+
+The differences between Bray-Curtis distances were tested using Kruskal-Wallis and post-hoc Dunn's test.
+
+**Part 2**
+
+To focus only on the most relevant pipeline settings, the two best-performing settings for each pipeline were picked to process the data. These had to meet the criteria of precision higher than 0.98, recall higher than 0.75, and median Bray-Curtis distance lower than 0.4. Furthermore, the default settings of each pipeline were added to this comparison.
+
+Statistical analysis began with filtration, removing the very low abundant (abundance \< 0.01% within a sample) and very low prevalent (prevalence \< 10% of all samples) genera. Next, to compare these two groups, the Shannon index was calculated and tested using the Mann-Whitney U test. Subsequently,nthe multivariate analysis was performed, testing differences in beta diversity (Aitchison distance) via PERMANOVA.
+
+Finally,univariate analysis was done utilizing Aldex2 v1.34 using 128 Monte-Carlo samples.\
+To answer the question to what degree pipelines differ from each other, a simple comparison was made (i) by plotting PCA on clr-transformed data and (ii) by comparing outputs of taxonomic assignments based on different pipelines. To highlight the different performances of the taxonomic classifiers, the VSEARCH results were re-classified in the same way as the other two pipelines using IDTAXA.
+
+# Packages and custom functions
+
+```{r}
+# PACKAGES
+suppressWarnings(suppressMessages({
+library(reshape2)
+library("phyloseq")
+library("ggplot2")      
+library("dplyr")        
+library(tibble)
+library(vegan)
+library(compositions)
+library(openxlsx)
+library(DECIPHER)
+library(pheatmap)
+library("biomformat")
+library(Biostrings)
+library(decontam)
+library(microDecon)
+library(FSA)
+library(ggpubr)
+library(ggfortify)
+library(eulerr)
+library(microbiome)
+}))
+```
+
+```{r}
+normalization <- function(phyloseq_object){
+  # normalization of phyloseq object
+  phyloseq_object_n <- phyloseq_object
+  asv_norm <- phyloseq_object_n@otu_table
+  taxa_norm <- phyloseq_object_n@tax_table
+  sums <- colSums(asv_norm[,])
+  
+  for (i in 1:length(sums)) {
+    asv_norm[,i] <- asv_norm[,i]/sums[i]
+  }
+  where <- rowSums(asv_norm) !=0
+  asv_norm <- asv_norm[where,]
+  taxa_norm <- taxa_norm[where,]
+  phyloseq_object_n@otu_table <- asv_norm
+  phyloseq_object_n@tax_table <- taxa_norm
+  return(phyloseq_object_n)
+}
+normalization2 <- function(taxa_reads_table){
+  # normalization of dataframe
+  taxa_reads_table_n <- taxa_reads_table
+  asv_norm <- taxa_reads_table_n[,7:ncol(taxa_reads_table_n)]
+  sums <- colSums(asv_norm[,])
+  
+  for (i in 1:length(sums)) {
+    asv_norm[,i] <- asv_norm[,i]/sums[i]
+  }
+  where <- rowSums(asv_norm) !=0
+  asv_norm <- asv_norm[where,]
+  taxa_reads_table_n <- taxa_reads_table_n[where,]
+  taxa_reads_table_n[,7:ncol(taxa_reads_table_n)] <- asv_norm
+  return(taxa_reads_table_n)
+}
+
+abundance_filtering <- function(phyloseq_object, to_filter= 0.01){
+  # abundance filtering of phyloseq object
+  phyloseq_object_n <- normalization(phyloseq_object)
+  filtering <- filter_taxa(phyloseq_object_n, function(x) sum(x > to_filter)>0 , FALSE)
+  phyloseq_object@otu_table <- phyloseq_object@otu_table[filtering,]
+  phyloseq_object@tax_table <- phyloseq_object@tax_table[filtering,]
+  return(phyloseq_object)
+}
+
+mock_zymo_genus_merging <- function(taxa_table,asv_table,zymo_genus){
+  # merging mock community samples with reference abundance
+  taxa_table[is.na(taxa_table)] <- "unassigned"
+  taxa_reads_table <- merge(taxa_table,asv_table, by="ASV", all=TRUE)
+  groups <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  columns <- names(taxa_reads_table)[9:ncol(taxa_reads_table)] # names of columns with samples
+  grouped_genus <- taxa_reads_table %>%
+          group_by_at(groups[1:6]) %>%
+          summarise(across(columns, sum))
+  mock_genus_n <- normalization2(grouped_genus)
+  to_filter <- (rowSums((mock_genus_n[,7:ncol(mock_genus_n)])>0.01))>0
+  mock_genus_n <- mock_genus_n[to_filter,]
+  mock_zymo_genus <- merge(mock_genus_n,zymo_genus, all=TRUE)
+  mock_zymo_genus[is.na(mock_zymo_genus)] <- 0
+  return(mock_zymo_genus)
+}
+
+genus_merging <- function(taxa_table,asv_table){
+  # merging taxonomy and filtering
+  taxa_table[is.na(taxa_table)] <- "unassigned"
+  taxa_reads_table <- merge(taxa_table,asv_table, by="ASV", all=TRUE)
+  groups <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  columns <- names(taxa_reads_table)[9:ncol(taxa_reads_table)] # names of columns with samples
+  grouped_genus <- taxa_reads_table %>%
+          group_by_at(groups[1:6]) %>%
+          summarise(across(columns, sum))
+  
+  asv_table <- grouped_genus[,7:ncol(grouped_genus)]
+  asv_table["ASV"] <- paste0("GENUS", 1:nrow(asv_table))
+  
+  taxa_table <- grouped_genus[,1:6]
+  taxa_table["ASV"] <- paste0("GENUS", 1:nrow(taxa_table))
+  
+  # Step 1: Calculate abundance of each ASV within each sample
+  abundance <- asv_table[, -which(colnames(asv_table)=="ASV")] / colSums(asv_table[,-which(colnames(asv_table)=="ASV")]) * 100
+  
+  # Step 2: Calculate prevalence of each ASV across all samples
+  prevalence <- rowSums(abundance > 0) / ncol(abundance) * 100
+
+  # Step 3: Filter out ASVs that are very low abundant and very low prevalent
+  threshold_abundance <- 0.01  # Abundance threshold (0.01%)
+  threshold_prevalence <- 10    # Prevalence threshold (10%)
+  
+  # Filter ASVs based on abundance and prevalence
+  to_filter <- rowSums(abundance >= threshold_abundance) > 0 & prevalence >= threshold_prevalence
+  asv_table <- asv_table[to_filter, ]
+  taxa_table <- taxa_table[to_filter,]
+  
+  # Output filtered ASV table
+  return(list(asv_table,taxa_table))
+}
+
+construct_phyloseq <- function(asv_table, taxa_table){
+  # construct phyloseq object - for mock communities (without metadata)
+  otu_mat <- asv_table
+  tax_mat <- taxa_table
+  
+  rownames(otu_mat) <- 1:nrow(otu_mat)
+  rownames(tax_mat) <- 1:nrow(tax_mat)
+  
+  otu_mat <- otu_mat %>%
+    tibble::column_to_rownames("ASV") 
+  tax_mat <- tax_mat %>% 
+    tibble::column_to_rownames("ASV")
+  
+  otu_mat <- as.matrix(otu_mat)
+  tax_mat <- as.matrix(tax_mat)
+  
+  OTU = otu_table(otu_mat, taxa_are_rows = TRUE)
+  TAX = tax_table(tax_mat) 
+  
+  object <- phyloseq(OTU, TAX)
+  return(object)
+}
+construct_phyloseq_real <- function(asv_table, taxa_table, metadata){
+  # construct phyloseq obect - for biopsy samples (with metadata)
+  otu_mat <- asv_table
+  tax_mat <- taxa_table
+  samples_df <- metadata
+  
+  rownames(otu_mat) <- 1:nrow(otu_mat)
+  rownames(tax_mat) <- 1:nrow(tax_mat)
+  
+  otu_mat <- otu_mat %>%
+    tibble::column_to_rownames("ASV") 
+  tax_mat <- tax_mat %>% 
+    tibble::column_to_rownames("ASV")
+  samples_df <- samples_df %>% 
+  tibble::column_to_rownames("SampleID") 
+  
+  otu_mat <- as.matrix(otu_mat)
+  tax_mat <- as.matrix(tax_mat)
+  
+  
+  OTU = otu_table(otu_mat, taxa_are_rows = TRUE)
+  TAX = tax_table(tax_mat) 
+  samples = sample_data(samples_df)
+  
+  object <- phyloseq(OTU, TAX, samples)
+  return(object)
+}
+
+read_counts <- function(asv_table,input_numbers){
+  # function for visualizing the read counts (input vs retained)
+  counts <- as.data.frame(colSums(asv_table[,- grep("ASV",colnames(asv_table))]))
+  colnames(counts) <- "Count"
+  counts["Sample"] <- gsub("-","_",rownames(counts))
+  rownames(counts) <- counts$Sample
+  counts <- merge(counts,input_numbers,by='row.names',all=TRUE)
+  counts %>%
+    ggplot() +
+    geom_col( aes(x=reorder(Sample,input), y=input), alpha=.8, width=1, show.legend = TRUE,fill="#a5cee3") +
+    geom_text(aes(x=reorder(Sample,input), y=input,label = input), size = 3, hjust = -0.2) + 
+    geom_col( aes(x=reorder(Sample,Count), y=Count), alpha=.8, width=0.5, show.legend = TRUE,fill="#e3211c") +
+    geom_text(aes(x=reorder(Sample,Count), y=Count,label = Count), size = 3, hjust = -0.1,color="#e32000") + 
+    scale_fill_brewer(palette = "Set2") +
+    coord_flip() +
+    xlab("") +
+    labs(y = "Number of reads") + 
+    theme(legend.position='none') +
+    theme_bw() 
+}
+
+precision <- function(mock_object_filt, zymo_taxa){
+  # calculating precision
+  asv_filt <- as.data.frame(mock_object_filt@otu_table)
+  asv_filt <- asv_filt[,grep("Mock",colnames(asv_filt))]
+  asv_filt <- asv_filt[rowSums(asv_filt)>0,]
+  taxa_filt <- as.data.frame(mock_object_filt@tax_table)
+  taxa_filt <- taxa_filt[rownames(asv_filt),]
+  zymo_taxa <- zymo_taxa[nchar(zymo_taxa$Genus)>0,"Genus"]
+  precs <- c()
+  for (c in 1:ncol(asv_filt)){
+    taxa_sample <- taxa_filt[rownames(asv_filt)[(asv_filt[,colnames(asv_filt)[c]]>0)],"Genus"]
+    taxa_sample <- taxa_sample[!is.na(taxa_sample)]
+    tp <- sum(taxa_sample %in% zymo_taxa)
+    fp <- sum(!(taxa_sample %in% zymo_taxa))
+    prec = tp/(tp + fp)
+    precs <- c(precs,prec)
+  }
+  return(mean(precs))
+}
+
+recall <- function(mock_object_filt, zymo_taxa){
+  # calculating recall
+  asv_filt <- as.data.frame(mock_object_filt@otu_table)
+  asv_filt <- asv_filt[,grep("Mock",colnames(asv_filt))]
+  asv_filt <- asv_filt[rowSums(asv_filt)>0,]
+  taxa_filt <- as.data.frame(mock_object_filt@tax_table)
+  taxa_filt <- taxa_filt[rownames(asv_filt),]
+  zymo_taxa <- zymo_taxa[nchar(zymo_taxa$Genus)>0,"Genus"]
+  recs <- c()
+  for (c in 1:ncol(asv_filt)){
+    taxa_sample <- taxa_filt[rownames(asv_filt)[(asv_filt[,colnames(asv_filt)[c]]>0)],"Genus"]
+    taxa_sample <- taxa_sample[!is.na(taxa_sample)]
+    tp <- sum(taxa_sample %in% zymo_taxa)
+    fn <- sum(!(zymo_taxa %in% taxa_sample))
+    rec = tp/(tp+fn)
+    recs <- c(recs,rec)
+  }
+  return(mean(recs))
+}
+
+```
+
+## Importing necessary data
+
+READ COUNTS
+
+```{r}
+input_numbers <- read.csv("results/input_reads.csv", sep="\t", row.names = 1)
+rownames(input_numbers) <- regmatches(rownames(input_numbers), regexpr("(Mock\\d+_\\d+)|(NC\\d+_\\d+)", rownames(input_numbers)))
+```
+
+ZYMO RESEARCH REFERENCE
+
+```{r}
+zymo_asv_table <- read.csv("zymo/asv_table.csv", sep=",")
+zymo_asv_table
+```
+
+```{r}
+zymo_taxa <- read.csv("zymo/taxa.csv", sep=",")
+zymo_taxa
+```
+
+```{r}
+zymo_object <- construct_phyloseq(zymo_asv_table,zymo_taxa)
+taxa_names(zymo_object) <- paste0("ZYMO",1:8)
+
+plot_bar(zymo_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_minimal() +
+  xlab("") + 
+  ylab("Relative Abundance") + 
+  scale_x_discrete(labels=c('Zymo Research Reference'),guide = guide_axis(angle = 0)) +
+  geom_text(aes(label = Abundance), position = position_stack(vjust = .5))
+```
+
+GENUS MERGING
+
+```{r}
+zymo_taxa_reads_table <- merge(zymo_taxa,zymo_asv_table, by="ASV", all=TRUE)
+groups <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+columns <- names(zymo_taxa_reads_table)[9:ncol(zymo_taxa_reads_table)] # names of columns with samples
+zymo_genus <- zymo_taxa_reads_table %>%
+        group_by_at(groups[1:6]) %>%
+        summarise(across(columns, sum))
+```
+
+## DADA2
+
+Utilizing DADA2, the paired reads were processed separately. After filtering and trimming with default parameters except for expected errors, the error model was trained for error rate estimation, and ASVs were inferred. The final step involved merging the paired reads, with default settings except for the maximum allowed mismatches in the overlap region. Chimeras were removed using the 'removeBimeraDenovo' function and taxonomic composition was obtained using IDTAXA from the DECIPHER R package v2.30.0. Taxonomic classifier was used in combination with SILVA v138.1 database.
+
+```{r}
+dada2_settings
+```
+
+### Setting 1
+
+```{r}
+asv_table <- read.csv("results_dada2/1/final_seqtab_1.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/1/taxa_1.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting1_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 1"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- data.frame(samples=NA)
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- data.frame()
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 2
+
+```{r}
+asv_table <- read.csv("results_dada2/2/final_seqtab_2.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/2/taxa_2.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting2_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 2"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 3
+
+```{r}
+asv_table <- read.csv("results_dada2/3/final_seqtab_3.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/3/taxa_3.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting3_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 3"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 4
+
+```{r}
+asv_table <- read.csv("results_dada2/4/final_seqtab_4.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/4/taxa_4.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting4_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 4"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 5
+
+```{r}
+asv_table <- read.csv("results_dada2/5/final_seqtab_5.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/5/taxa_5.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting5_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 5"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 6
+
+```{r}
+asv_table <- read.csv("results_dada2/6/final_seqtab_6.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/6/taxa_6.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting6_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 6"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 7
+
+```{r}
+asv_table <- read.csv("results_dada2/7/final_seqtab_7.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/7/taxa_7.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting7_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 7"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 8
+
+```{r}
+asv_table <- read.csv("results_dada2/8/final_seqtab_8.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/8/taxa_8.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting8_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 8"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 9
+
+```{r}
+asv_table <- read.csv("results_dada2/9/final_seqtab_9.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/9/taxa_9.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting9_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 9"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 10
+
+```{r}
+asv_table <- read.csv("results_dada2/10/final_seqtab_10.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/10/taxa_10.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting10_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 10"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 11
+
+```{r}
+asv_table <- read.csv("results_dada2/11/final_seqtab_11.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/11/taxa_11.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting11_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 11"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 12
+
+```{r}
+asv_table <- read.csv("results_dada2/12/final_seqtab_12.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/12/taxa_12.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting12_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 12"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 13
+
+```{r}
+asv_table <- read.csv("results_dada2/13/final_seqtab_13.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/13/taxa_13.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting13_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 13"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 14
+
+```{r}
+asv_table <- read.csv("results_dada2/14/final_seqtab_14.csv")
+colnames(asv_table) <- c("ASV",regmatches(colnames(asv_table), regexpr("[[:alpha:]]+\\d+_\\d+", colnames(asv_table))))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_dada2/14/taxa_14.csv", sep=",", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting14_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 14"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Comparative Analysis
+
+#### Mock community + negative controls
+
+##### Bray curtis distances - heatmap
+
+On the heatmap, there is the Bray Curtis distance for each sample and the DADA2 settings with which they were processed. The settings are color coded. The smaller the Bray-Curtis distance, the more similar the sample is to the reference. Negative controls are less similar, therefore their distance is larger (parts with red colouring).
+
+```{r}
+annotation_df <- data.frame(maxEE = c("c(2,2)","c(2,2)","c(2,3)","c(2,3)","c(2,4)","c(2,4)","c(2,5)","c(2,5)", "c(1,3)", "c(1,3)", "c(1,4)","c(1,4)","c(1,5)","c(1,5)"),maxMismatch = c(0,1,0,1,0,1,0,1,0,1,0,1,0,1),row.names = paste("SETTING",(1:14)))
+
+bray_curtis_distances$samples = rownames(bray_curtis_distances)
+pheatmap(bray_curtis_distances[-which(rownames(bray_curtis_distances)=="Mock.Reference"),-which(names(bray_curtis_distances) == "samples")],cluster_rows = FALSE, cellheight = 6, annotation_col = annotation_df)
+```
+
+##### Ordination
+
+First, the one final variable has to be created to store the results for all settings (all_settings_genus_object).
+
+MERGING ALL SETTINGS TOGETHER
+
+```{r}
+colnames(setting1_genus)[7:ncol(setting1_genus)] <- paste("S1", colnames(setting1_genus)[7:(ncol(setting1_genus))])
+colnames(setting2_genus)[7:ncol(setting2_genus)] <- paste("S2", colnames(setting2_genus)[7:ncol(setting2_genus)])
+colnames(setting3_genus)[7:ncol(setting3_genus)] <- paste("S3", colnames(setting3_genus)[7:ncol(setting3_genus)])
+colnames(setting4_genus)[7:ncol(setting4_genus)] <- paste("S4", colnames(setting4_genus)[7:ncol(setting4_genus)])
+colnames(setting5_genus)[7:ncol(setting5_genus)] <- paste("S5", colnames(setting5_genus)[7:ncol(setting5_genus)])
+colnames(setting6_genus)[7:ncol(setting6_genus)] <- paste("S6", colnames(setting6_genus)[7:ncol(setting6_genus)])
+colnames(setting7_genus)[7:ncol(setting7_genus)] <- paste("S7", colnames(setting7_genus)[7:ncol(setting7_genus)])
+colnames(setting8_genus)[7:ncol(setting8_genus)] <- paste("S8", colnames(setting8_genus)[7:ncol(setting8_genus)])
+colnames(setting9_genus)[7:ncol(setting9_genus)] <- paste("S9", colnames(setting9_genus)[7:ncol(setting9_genus)])
+colnames(setting10_genus)[7:ncol(setting10_genus)] <- paste("S10", colnames(setting10_genus)[7:ncol(setting10_genus)])
+colnames(setting11_genus)[7:ncol(setting11_genus)] <- paste("S11", colnames(setting11_genus)[7:ncol(setting11_genus)])
+colnames(setting12_genus)[7:ncol(setting12_genus)] <- paste("S12", colnames(setting12_genus)[7:ncol(setting12_genus)])
+colnames(setting13_genus)[7:ncol(setting13_genus)] <- paste("S13", colnames(setting13_genus)[7:ncol(setting13_genus)])
+colnames(setting14_genus)[7:ncol(setting14_genus)] <- paste("S14", colnames(setting14_genus)[7:ncol(setting14_genus)])
+```
+
+```{r}
+all_settings_genus <- merge(setting1_genus,setting2_genus[,-which(colnames(setting2_genus)=="S2 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting3_genus[,-which(colnames(setting3_genus)=="S3 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting4_genus[,-which(colnames(setting4_genus)=="S4 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting5_genus[,-which(colnames(setting5_genus)=="S5 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting6_genus[,-which(colnames(setting6_genus)=="S6 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting7_genus[,-which(colnames(setting7_genus)=="S7 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting8_genus[,-which(colnames(setting8_genus)=="S8 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting9_genus[,-which(colnames(setting9_genus)=="S9 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting10_genus[,-which(colnames(setting10_genus)=="S10 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting11_genus[,-which(colnames(setting11_genus)=="S11 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting12_genus[,-which(colnames(setting12_genus)=="S12 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting13_genus[,-which(colnames(setting13_genus)=="S13 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting14_genus[,-which(colnames(setting14_genus)=="S14 Mock.Reference")], all=TRUE)
+all_settings_genus[is.na(all_settings_genus)] <- 0
+```
+
+```{r}
+# phyloseq object
+all_settings_genus_asv <- all_settings_genus[,7:ncol(all_settings_genus)]
+all_settings_genus_asv["ASV"] <- paste("ASV",1:nrow(all_settings_genus_asv))
+all_settings_genus_taxa <- all_settings_genus[,1:6]
+all_settings_genus_taxa["ASV"] <- paste("ASV",1:nrow(all_settings_genus_taxa))
+all_settings_genus_object <- construct_phyloseq(all_settings_genus_asv, all_settings_genus_taxa)
+```
+
+ORDINATION - PCoA
+
+Here, the Principal Coordinate Analysis (PCoA) is used to visualize the distance matrix. Mock community samples cluster separately from negative controls.
+
+```{r}
+ord_b <- ordinate(all_settings_genus_object, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_object@otu_table))
+data_for_pca_bray["setting"] <- substring(rownames(data_for_pca_bray),1,3)
+data_for_pca_bray["sample"] <- regmatches(rownames(data_for_pca_bray), regexpr("(Mock)|(NC)|(Mock.Reference)", rownames(data_for_pca_bray)))
+data_for_pca_bray[data_for_pca_bray$sample=="Mock.Reference","sample"] <- "ZYMO REFERENCE"
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= sample)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+#### Mock community
+
+Next, the mock community samples without the negative control presence are analyzed, to investigate the patterns in taxonomic composition revealed by individual bioinformatics pipeline.
+
+##### Ordination
+
+In the PCoA plot, some samples processed with the same setup form a consistent cluster, on the other hand (e.g. S6), other setups caused the samples to be more fragmented on the plot (e.g. S13).
+
+```{r}
+# WITHOUT NC
+all_settings_genus_asv_mock <- all_settings_genus_asv[,grep("(Mock)|(ASV)",colnames(all_settings_genus_asv))]
+to_filter <- (rowSums((all_settings_genus_asv_mock[,-which(colnames(all_settings_genus_asv_mock)=="ASV")])>0))>0
+all_settings_genus_asv_mock <- all_settings_genus_asv_mock[to_filter,]
+all_settings_genus_taxa_mock <- all_settings_genus_taxa[to_filter,]
+
+# BRAY CURTIS
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(all_settings_genus_asv_mock[,-which(colnames(all_settings_genus_asv_mock)=="ASV")])), method="bray"))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"S1 Mock.Reference"])
+rownames(mock_b_dist) <- samples
+colnames(mock_b_dist) <- "bray_curtis"
+
+all_settings_genus_mock_object <- construct_phyloseq(all_settings_genus_asv_mock, all_settings_genus_taxa_mock)
+all_settings_genus_mock_object_dada2 <- all_settings_genus_mock_object
+
+# ORDINATION
+ord_b <- ordinate(all_settings_genus_mock_object, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_mock_object@otu_table))
+data_for_pca_bray["Setting"] <- substring(rownames(data_for_pca_bray),1,3)
+data_for_pca_bray["sample"] <- regmatches(rownames(data_for_pca_bray), regexpr("(Mock)|(Mock.Reference)", rownames(data_for_pca_bray)))
+data_for_pca_bray[data_for_pca_bray$sample=="Mock.Reference","sample"] <- "ZYMO REFERENCE"
+data_for_pca_bray[data_for_pca_bray$sample=="ZYMO REFERENCE","Setting"] <- "ZYMO REFERENCE"
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= Setting)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis") + 
+  scale_color_manual(values=c(
+    "#1E75B0", "#ABC3E3", "#FA7D0E","#FAB776",
+    "#2B9D2B", "#D90368", "#D22627","#FA9593",
+    "#9165B9", "#FAF33E", "#89544A","#C09991",
+    "#DF75BE", "#F2B2CE", "#1EFC1E"))
+```
+
+##### Bray Curtis distribution - boxplot
+
+This boxplot shows the distribution of Bray-Curtis distances between individual mock community samples and reference abundances across different DADA2's settings. Boxplot reveals that DADA2 at different settings is not consistent in the results. Worse results are achieved by settings with maxMismatch=0, which does not allow any mismatches when merging reads in the pipeline.
+
+```{r}
+rownames(mock_b_dist)[which(rownames(mock_b_dist)=="S1 Mock.Reference")] <- "ZYMO REFERENCE"
+mock_b_dist["Setting"] <- data_for_pca_bray$Setting
+mock_b_dist_dada2 <- mock_b_dist
+
+ggplot(data=mock_b_dist,aes(x=Setting, y=bray_curtis, fill=Setting)) + 
+  geom_boxplot() + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) 
+```
+
+##### Bray Curtis distances - heatmap
+
+CREATE A DATAFRAME
+
+```{r}
+mock_b_dist_settings <- data.frame(
+  row.names = unique(regmatches(rownames(mock_b_dist), regexpr("Mock\\d+_\\d+", rownames(mock_b_dist)))),
+  `S1` = mock_b_dist[grep("S1 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S2` = mock_b_dist[grep("S2 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S3` = mock_b_dist[grep("S3 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S4` = mock_b_dist[grep("S4 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S5` = mock_b_dist[grep("S5 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S6` = mock_b_dist[grep("S6 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S7` = mock_b_dist[grep("S7 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S8` = mock_b_dist[grep("S8 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S9` = mock_b_dist[grep("S9 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S10` = mock_b_dist[grep("S10 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S11` = mock_b_dist[grep("S11 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S12` = mock_b_dist[grep("S12 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S13` = mock_b_dist[grep("S13 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S14` = mock_b_dist[grep("S14",rownames(mock_b_dist)),"bray_curtis"])
+
+mock_b_dist_settings_dada2 <- mock_b_dist_settings
+```
+
+HEATMAP OF ALL MOCK SAMPLES
+
+The heatmap visualizes the same information as the boxplot, but for each sample separately for a more detailed overview.
+
+In this visualization it can be clearly seen that the mock samples processed with maxMismatch=0 parameter have higher Bray-Curtis distance in general.
+
+```{r}
+annotation_df <- data.frame(maxEE = c("c(2,2)","c(2,2)","c(2,3)","c(2,3)","c(2,4)","c(2,4)","c(2,5)","c(2,5)", "c(1,3)", "c(1,3)", "c(1,4)","c(1,4)","c(1,5)","c(1,5)"),maxMismatch = c(0,1,0,1,0,1,0,1,0,1,0,1,0,1),row.names = paste0("S",(1:14)))
+
+pheatmap(mock_b_dist_settings,cluster_rows = FALSE, cellheight = 10, annotation_col = annotation_df)
+```
+
+AVERAGE BRAY CURTIS
+
+From this heatmap, a clear difference is visible between the average performance for all samples. The best results for Bray-Curtis distance were achieved by settings S4 and S12.
+
+```{r}
+pheatmap(mock_b_dist_settings,cluster_rows = FALSE, cellheight = 10, kmeans_k = 1,annotation_col = annotation_df)
+```
+
+##### Statistical test
+
+The difference in Bray-Curtis distances is tested by the Kruskal-Wallis test and Dunn's test.
+
+```{r}
+print("Kruskal Wallis")
+kruskal.test(bray_curtis ~ Setting, data = mock_b_dist)
+print("Post-hoc")
+dunnTest(bray_curtis ~ Setting,
+              data=mock_b_dist,
+              method="bh")
+```
+
+## VSEARCH-UNOISE3
+
+VSEARCH-UNOISE3 and Deblur operate with merged reads, unlike DADA2. Therefore, the initial common step for these two pipelines was merging the paired reads. This was conducted using the 'vsearch --fastq mergepairs' command, with different values of minimum overlap region length and maximum allowed mismatches. the subsequent steps differed for each pipeline.
+
+In VSEARCH, the reads underwent reorientation and filtering, with various settings for expected error and truncation length. These filtered reads were then denoised using UNOISE3, which is implemented in VSEARCH. Chimeras were discarded using 'uchime3 denovo'. Finally, taxonomic assignment was performed using SINTAX.
+
+Since the output of the SINTAX taxonomic classifier is also a probability matrix of classification, those with a probability of less than 0.7 were reassigned as 'unclassified', while others remained unchanged.
+
+```{r}
+vsearch_settings
+```
+
+### Setting 1
+
+```{r}
+asv_table <- read.csv("results_vsearch/1/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/1/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting1_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 1"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- data.frame(samples=NA)
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 2
+
+```{r}
+asv_table <- read.csv("results_vsearch/2/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/2/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting2_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 2"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 3
+
+```{r}
+asv_table <- read.csv("results_vsearch/3/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/3/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting3_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 3"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 4
+
+```{r}
+asv_table <- read.csv("results_vsearch/4/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/4/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting4_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 4"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 5
+
+```{r}
+asv_table <- read.csv("results_vsearch/5/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/5/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting5_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 5"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 6
+
+```{r}
+asv_table <- read.csv("results_vsearch/6/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/6/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting6_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 6"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 7
+
+```{r}
+asv_table <- read.csv("results_vsearch/7/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/7/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+```
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting7_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 7"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 8
+
+```{r}
+asv_table <- read.csv("results_vsearch/8/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/8/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+SPLITING PROBABILITES AND TAXA TABLE
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting8_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 8"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 9
+
+```{r}
+asv_table <- read.csv("results_vsearch/9/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("results_vsearch/9/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table[taxa_table=="Limosilactobacillus"] <- "Lactobacillus"
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting9_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"Mock.Reference"])
+colnames(mock_b_dist) <- "SETTING 9"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Comparative Analysis
+
+#### Mock community + negative controls
+
+##### Bray curtis distances - heatmap
+
+On the heatmap, there is the Bray-Curtis distance for each sample and the VSEARCH settings with which they were processed. The settings are color coded. The smaller the Bray-Curtis distance, the more similar the sample is to the reference. Negative controls are less similar, therefore their distance is larger (parts with red colouring).
+
+Even from this perspective it can be seen that unlike DADA2, VSEARCH is consistent in its results across different settings and there is no mock community sample that has a significantly higher Bray-Curtis distance (mock samples in blue colors).
+
+```{r}
+annotation_df <- data.frame(max_diffs = c(2,2,3,3,2,2,2,2,2),fastq_maxee = c(1,1,1,2,2,2,1,1,2),
+                            fastq_trunclen = c(250,350,350,350,350,400,400,400,400),fastq_minovlen=c(10,12,12,12,12,12,12,10,10),
+                            row.names = paste("SETTING",(1:9)))
+
+bray_curtis_distances$samples = rownames(bray_curtis_distances)
+pheatmap(bray_curtis_distances[-41,-which(names(bray_curtis_distances) == "samples")],cluster_rows = FALSE, cellheight = 6, annotation_col = annotation_df, )
+```
+
+##### Ordination
+
+First, the one final variable has to be created to store the results for all settings (all_settings_genus_object).
+
+```{r}
+colnames(setting1_genus)[7:ncol(setting1_genus)] <- paste("S1", colnames(setting1_genus)[7:(ncol(setting1_genus))])
+colnames(setting2_genus)[7:ncol(setting2_genus)] <- paste("S2", colnames(setting2_genus)[7:ncol(setting2_genus)])
+colnames(setting3_genus)[7:ncol(setting3_genus)] <- paste("S3", colnames(setting3_genus)[7:ncol(setting3_genus)])
+colnames(setting4_genus)[7:ncol(setting4_genus)] <- paste("S4", colnames(setting4_genus)[7:ncol(setting4_genus)])
+colnames(setting5_genus)[7:ncol(setting5_genus)] <- paste("S5", colnames(setting5_genus)[7:ncol(setting5_genus)])
+colnames(setting6_genus)[7:ncol(setting6_genus)] <- paste("S6", colnames(setting6_genus)[7:ncol(setting6_genus)])
+colnames(setting7_genus)[7:ncol(setting7_genus)] <- paste("S7", colnames(setting7_genus)[7:ncol(setting7_genus)])
+colnames(setting8_genus)[7:ncol(setting8_genus)] <- paste("S8", colnames(setting8_genus)[7:ncol(setting8_genus)])
+colnames(setting9_genus)[7:ncol(setting9_genus)] <- paste("S9", colnames(setting9_genus)[7:ncol(setting9_genus)])
+```
+
+```{r}
+all_settings_genus <- merge(setting1_genus,setting2_genus[,-which(colnames(setting2_genus)=="S2 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting3_genus[,-which(colnames(setting3_genus)=="S3 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting4_genus[,-which(colnames(setting4_genus)=="S4 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting5_genus[,-which(colnames(setting5_genus)=="S5 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting6_genus[,-which(colnames(setting6_genus)=="S6 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting7_genus[,-which(colnames(setting7_genus)=="S7 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting8_genus[,-which(colnames(setting8_genus)=="S8 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting9_genus[,-which(colnames(setting9_genus)=="S9 Mock.Reference")], all=TRUE)
+all_settings_genus[is.na(all_settings_genus)] <- 0
+```
+
+```{r}
+#phyloseq object
+all_settings_genus_asv <- all_settings_genus[,7:ncol(all_settings_genus)]
+all_settings_genus_asv["ASV"] <- paste("ASV",1:nrow(all_settings_genus_asv))
+all_settings_genus_taxa <- all_settings_genus[,1:6]
+all_settings_genus_taxa["ASV"] <- paste("ASV",1:nrow(all_settings_genus_taxa))
+all_settings_genus_object <- construct_phyloseq(all_settings_genus_asv, all_settings_genus_taxa)
+```
+
+ORDINATION - PCoA
+
+Here, the Principal Coordinate Analysis (PCoA) is used to visualize the distance matrix. Mock community samples cluster separately from negative controls.
+
+Compared to PCoA from the DADA2 pipeline, it can be seen that the mock community samples are more similar to each other.
+
+```{r}
+ord_b <- ordinate(all_settings_genus_object, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_object@otu_table))
+data_for_pca_bray["setting"] <- substring(rownames(data_for_pca_bray),1,3)
+data_for_pca_bray["sample"] <- regmatches(rownames(data_for_pca_bray), regexpr("(Mock)|(NC)|(Mock.Reference)", rownames(data_for_pca_bray)))
+data_for_pca_bray[data_for_pca_bray$sample=="Mock.Reference","sample"] <- "ZYMO REFERENCE"
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= sample)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+#### Mock community
+
+Next, the mock community samples without the negative control presence are analyzed, to investigate the patterns in taxonomic composition revealed by individual bioinformatics pipeline.
+
+##### Ordination
+
+An interesting finding is that while all settings are nearly identical, S1 differs, with some samples being considerably close to the reference.
+
+One would expect that the reverse might be the case, as setting S1 involves trimming to 250 bp, which significantly reduces the resolution for the denoising algorithm and the taxonomic classifier.
+
+```{r}
+# WITHOUT NC
+all_settings_genus_asv_mock <- all_settings_genus_asv[,grep("(Mock)|(ASV)",colnames(all_settings_genus_asv))]
+to_filter <- (rowSums((all_settings_genus_asv_mock[,-which(colnames(all_settings_genus_asv_mock)=="ASV")])>0))>0
+all_settings_genus_asv_mock <- all_settings_genus_asv_mock[to_filter,]
+all_settings_genus_taxa_mock <- all_settings_genus_taxa[to_filter,]
+
+# BRAY CURTIS
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(all_settings_genus_asv_mock[,-which(colnames(all_settings_genus_asv_mock)=="ASV")])), method="bray"))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"S1 Mock.Reference"])
+rownames(mock_b_dist) <- samples
+colnames(mock_b_dist) <- "bray_curtis"
+
+all_settings_genus_mock_object <- construct_phyloseq(all_settings_genus_asv_mock, all_settings_genus_taxa_mock)
+all_settings_genus_mock_object_vsearch <- all_settings_genus_mock_object
+
+# ORDINATION
+ord_b <- ordinate(all_settings_genus_mock_object, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_mock_object@otu_table))
+data_for_pca_bray["Setting"] <- substring(rownames(data_for_pca_bray),1,3)
+data_for_pca_bray["sample"] <- regmatches(rownames(data_for_pca_bray), regexpr("(Mock)|(Mock.Reference)", rownames(data_for_pca_bray)))
+data_for_pca_bray[data_for_pca_bray$sample=="Mock.Reference","sample"] <- "ZYMO REFERENCE"
+data_for_pca_bray[data_for_pca_bray$sample=="ZYMO REFERENCE","Setting"] <- "ZYMO REFERENCE"
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= Setting)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis") + 
+  scale_color_manual(values=c(
+    "#1E75B0", "#ABC3E3", "#FA7D0E","#FAB776",
+    "#2B9D2B", "#D90368", "#D22627","#FA9593",
+    "#9165B9", "#1EFC1E"))
+```
+
+##### Bray Curtis distribution - boxplot
+
+This boxplot shows the distribution of Bray-Curtis distances between individual mock community samples and reference abundances across different VSEARCH's settings.
+
+This confirms the observation from the PCoA plot, where the S1 setup shows an overall smaller Bray-Curtis distance than the other setups.
+
+```{r}
+rownames(mock_b_dist)[23] <- "ZYMO REFERENCE"
+mock_b_dist["Setting"] <- data_for_pca_bray$Setting
+mock_b_dist_vsearch <- mock_b_dist
+
+ggplot(data=mock_b_dist,aes(x=Setting, y=bray_curtis, fill=Setting)) + 
+  geom_boxplot() + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) 
+```
+
+##### Bray Curtis distances - heatmap
+
+The heatmap visualizes the same information as the boxplot, but for each sample separately for a more detailed overview.
+
+```{r}
+mock_b_dist_settings <- data.frame(
+  row.names = unique(regmatches(rownames(mock_b_dist), regexpr("Mock\\d+_\\d+", rownames(mock_b_dist)))),
+  `S1` = mock_b_dist[grep("S1 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S2` = mock_b_dist[grep("S2 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S3` = mock_b_dist[grep("S3 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S4` = mock_b_dist[grep("S4 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S5` = mock_b_dist[grep("S5 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S6` = mock_b_dist[grep("S6 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S7` = mock_b_dist[grep("S7 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S8` = mock_b_dist[grep("S8 ",rownames(mock_b_dist)),"bray_curtis"],
+  `S9` = mock_b_dist[grep("S9 ",rownames(mock_b_dist)),"bray_curtis"])
+
+mock_b_dist_settings_vsearch <- mock_b_dist_settings
+```
+
+HEATMAP OF ALL MOCK SAMPLES
+
+```{r}
+annotation_df <- data.frame(max_diffs = c(2,2,3,3,2,2,2,2,2),fastq_maxee = c(1,1,1,2,2,2,1,1,2),
+                            fastq_trunclen = c(250,350,350,350,350,400,400,400,400),fastq_minovlen=c(10,12,12,12,12,12,12,10,10),
+                            row.names = paste0("S",(1:9)))
+
+pheatmap(mock_b_dist_settings,cluster_rows = FALSE, cellheight = 10, annotation_col = annotation_df)
+```
+
+AVERAGE BRAY CURTIS
+
+It is also clearly shown here that the S1 setup shows an overall the best performance than the other setups.
+
+```{r}
+pheatmap(mock_b_dist_settings,cluster_rows = FALSE, cellheight = 10, kmeans_k = 1,annotation_col = annotation_df)
+```
+
+##### Statistical test
+
+The difference in Bray-Curtis distances is tested by the Kruskal-Wallis test and Dunn's test.
+
+```{r}
+print("Kruskal Wallis")
+kruskal.test(bray_curtis ~ Setting, data = mock_b_dist)
+print("Post-hoc")
+dunnTest(bray_curtis ~ Setting,
+              data=mock_b_dist,
+              method="bh")
+```
+
+## Deblur
+
+Following the merging of reads, as explained in the previous section, the QIIME2-Deblur plugin was utilized, with the different sequence trim lengths, consistent with those used in VSEARCH. The taxonomic composition was obtained using IDTAXA, similar to the approach employed with DADA2. Taxonomic classifier was used in combination with SILVA v138.1 database.
+
+```{r}
+deblur_settings
+```
+
+### Setting 1
+
+```{r}
+my_biom = read_biom("results_deblur/1/feature-table.biom")
+my_biom
+asv_table <- as.data.frame(as(biom_data(my_biom), "matrix"))
+colnames(asv_table) <- gsub("-","_",colnames(asv_table))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_deblur/1/taxa_1.csv", sep="\t", row.names = 1)
+taxa_table
+asv_table["ASV"] <- taxa_table["ASV"]
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting1_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,41])
+colnames(mock_b_dist) <- "SETTING 1"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- data.frame(samples=NA)
+bray_curtis_distances <- cbind(mock_b_dist,bray_curtis_distances)
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 2
+
+```{r}
+my_biom = read_biom("results_deblur/2/feature-table.biom")
+my_biom
+asv_table <- as.data.frame(as(biom_data(my_biom), "matrix"))
+colnames(asv_table) <- gsub("-","_",colnames(asv_table))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("results_deblur/2/taxa_2.csv", sep="\t", row.names = 1)
+taxa_table
+asv_table["ASV"] <- taxa_table["ASV"]
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting2_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,41])
+colnames(mock_b_dist) <- "SETTING 2"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- merge(mock_b_dist,bray_curtis_distances, by='row.names')
+rownames(bray_curtis_distances) <- bray_curtis_distances$Row.names
+bray_curtis_distances <- bray_curtis_distances[,-1]
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 4
+
+```{r}
+my_biom = read_biom("results_deblur/4/feature-table.biom")
+my_biom
+asv_table <- as.data.frame(as(biom_data(my_biom), "matrix"))
+colnames(asv_table) <- gsub("-","_",colnames(asv_table))
+asv_table
+
+```
+
+```{r}
+taxa_table <- read.csv("results_deblur/4/taxa_4.csv", sep="\t", row.names = 1)
+taxa_table
+asv_table["ASV"] <- taxa_table["ASV"]
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting4_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,41])
+colnames(mock_b_dist) <- "SETTING 4"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- merge(mock_b_dist,bray_curtis_distances, by='row.names')
+rownames(bray_curtis_distances) <- bray_curtis_distances$Row.names
+bray_curtis_distances <- bray_curtis_distances[,-1]
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 5
+
+```{r}
+my_biom = read_biom("results_deblur/5/feature-table.biom")
+my_biom
+asv_table <- as.data.frame(as(biom_data(my_biom), "matrix"))
+colnames(asv_table) <- gsub("-","_",colnames(asv_table))
+asv_table
+
+```
+
+```{r}
+taxa_table <- read.csv("results_deblur/5/taxa_5.csv", sep="\t", row.names = 1)
+taxa_table
+asv_table["ASV"] <- taxa_table["ASV"]
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting5_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,41])
+colnames(mock_b_dist) <- "SETTING 5"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- merge(mock_b_dist,bray_curtis_distances, by='row.names')
+rownames(bray_curtis_distances) <- bray_curtis_distances$Row.names
+bray_curtis_distances <- bray_curtis_distances[,-1]
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 6
+
+```{r}
+my_biom = read_biom("results_deblur/6/feature-table.biom")
+my_biom
+asv_table <- as.data.frame(as(biom_data(my_biom), "matrix"))
+colnames(asv_table) <- gsub("-","_",colnames(asv_table))
+asv_table
+
+```
+
+```{r}
+taxa_table <- read.csv("results_deblur/6/taxa_6.csv", sep="\t", row.names = 1)
+taxa_table
+asv_table["ASV"] <- taxa_table["ASV"]
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting6_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,41])
+colnames(mock_b_dist) <- "SETTING 6"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- merge(mock_b_dist,bray_curtis_distances, by='row.names')
+rownames(bray_curtis_distances) <- bray_curtis_distances$Row.names
+bray_curtis_distances <- bray_curtis_distances[,-1]
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Setting 8
+
+```{r}
+my_biom = read_biom("results_deblur/8/feature-table.biom")
+my_biom
+asv_table <- as.data.frame(as(biom_data(my_biom), "matrix"))
+colnames(asv_table) <- gsub("-","_",colnames(asv_table))
+asv_table
+
+```
+
+```{r}
+taxa_table <- read.csv("results_deblur/8/taxa_8.csv", sep=",")
+taxa_table
+asv_table["ASV"] <- taxa_table["ASV"]
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+PHYLOSEQ OBJECT, FILTERING
+
+```{r}
+# phyloseq object
+mock_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+mock_object_filt <- abundance_filtering(mock_object)
+
+#nornalization
+mock_object_n <- normalization(mock_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# merging samples
+mock_with_reference <- merge_phyloseq(mock_object_n, zymo_object)
+
+# plot with reference
+p1 <- plot_bar(mock_with_reference, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(mock_object, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+MERGING AND BRAY CURTIS
+
+```{r}
+# Genus merging
+mock_zymo_genus <- mock_zymo_genus_merging(taxa_table,asv_table,zymo_genus)
+setting8_genus <- mock_zymo_genus
+
+# Bray Curtis distance
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(as.data.frame(mock_zymo_genus[,7:ncol(mock_zymo_genus)])), method="bray")))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,41])
+colnames(mock_b_dist) <- "SETTING 8"
+rownames(mock_b_dist) <- samples
+
+bray_curtis_distances <- merge(mock_b_dist,bray_curtis_distances, by='row.names')
+rownames(bray_curtis_distances) <- bray_curtis_distances$Row.names
+bray_curtis_distances <- bray_curtis_distances[,-1]
+```
+
+PRECISION AND RECALL
+
+```{r}
+performance_mat <- rbind(performance_mat,c(precision(mock_object_filt,zymo_taxa), recall(mock_object_filt,zymo_taxa)))
+```
+
+### Comparative Analysis
+
+#### Mock community + negative controls
+
+##### Bray curtis distances - heatmap
+
+On the heatmap, there is the Bray-Curtis distance for each sample and the Deblur settings with which they were processed. The settings are color coded. The smaller the Bray-Curtis distance, the more similar the sample is to the reference. Negative controls are less similar, therefore their distance is larger.
+
+Similar results as VSEARCH can be observed, as Deblur consistent in its results across different settings and there is no mock community sample that has a significantly higher Bray-Curtis distance (mock samples in blue colors). However, setting S1 reports considerably higher Bray-Curtis distance, which can be the result of the high truncation length leading to low resolution of Deblur.
+
+```{r}
+annotation_df <- data.frame(max_diffs = c(2,2,3,2,2,2),fastq_minovlen = c(10,12,12,12,12,10),
+                            fastq_trunclen = c(250,350,350,350,400,400),
+                            row.names = paste("SETTING",c(1,2,4,5,6,8)))
+bray_curtis_distances$samples = rownames(bray_curtis_distances)
+pheatmap(bray_curtis_distances[-1,-which(names(bray_curtis_distances) == "samples")],cluster_rows = FALSE, cellheight = 6, annotation_col = annotation_df, )
+```
+
+##### Ordination
+
+MERGING ALL SETTINGS TOGETHER
+
+```{r}
+colnames(setting1_genus)[7:ncol(setting1_genus)] <- paste("S1", colnames(setting1_genus)[7:(ncol(setting1_genus))])
+colnames(setting2_genus)[7:ncol(setting2_genus)] <- paste("S2", colnames(setting2_genus)[7:ncol(setting2_genus)])
+colnames(setting4_genus)[7:ncol(setting4_genus)] <- paste("S4", colnames(setting4_genus)[7:ncol(setting4_genus)])
+colnames(setting5_genus)[7:ncol(setting5_genus)] <- paste("S5", colnames(setting5_genus)[7:ncol(setting5_genus)])
+colnames(setting6_genus)[7:ncol(setting6_genus)] <- paste("S6", colnames(setting6_genus)[7:ncol(setting6_genus)])
+colnames(setting8_genus)[7:ncol(setting8_genus)] <- paste("S8", colnames(setting8_genus)[7:ncol(setting8_genus)])
+```
+
+```{r}
+all_settings_genus <- merge(setting1_genus,setting2_genus[,-which(colnames(setting2_genus)=="S2 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting4_genus[,-which(colnames(setting4_genus)=="S4 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting5_genus[,-which(colnames(setting5_genus)=="S5 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting6_genus[,-which(colnames(setting6_genus)=="S6 Mock.Reference")], all=TRUE)
+all_settings_genus <- merge(all_settings_genus,setting8_genus[,-which(colnames(setting8_genus)=="S8 Mock.Reference")], all=TRUE)
+all_settings_genus[is.na(all_settings_genus)] <- 0
+```
+
+```{r}
+#phyloseq object
+all_settings_genus_asv <- all_settings_genus[,7:ncol(all_settings_genus)]
+all_settings_genus_asv["ASV"] <- paste("ASV",1:nrow(all_settings_genus_asv))
+all_settings_genus_taxa <- all_settings_genus[,1:6]
+all_settings_genus_taxa["ASV"] <- paste("ASV",1:nrow(all_settings_genus_taxa))
+
+all_settings_genus_object <- construct_phyloseq(all_settings_genus_asv, all_settings_genus_taxa)
+```
+
+ORDINATION - PCoA
+
+Here, the Principal Coordinate Analysis (PCoA) is used to visualize the distance matrix. Mock community samples cluster separately from negative controls.
+
+Compared to PCoA from the DADA2 pipeline, it can be seen that the mock community samples are more similar to each other (similar as VSEARCH).
+
+```{r}
+ord_b <- ordinate(all_settings_genus_object, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_object@otu_table))
+data_for_pca_bray["setting"] <- substring(rownames(data_for_pca_bray),1,3)
+data_for_pca_bray["sample"] <- regmatches(rownames(data_for_pca_bray), regexpr("(Mock)|(NC)|(Mock.Reference)", rownames(data_for_pca_bray)))
+data_for_pca_bray[data_for_pca_bray$sample=="Mock.Reference","sample"] <- "ZYMO REFERENCE"
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= sample)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+#### Mock community
+
+Next, the mock community samples without the negative control presence are analyzed, to investigate the patterns in taxonomic composition revealed by individual bioinformatics pipeline.
+
+##### Ordination
+
+Here, S1 setting forms the individual cluster, however, unlike VSEARCH, the distances are higher as expected due to lower resolution for the denoising algorithm and the taxonomic classifier.
+
+```{r}
+# WITHOUT NC
+all_settings_genus_asv_mock <- all_settings_genus_asv[,grep("(Mock)|(ASV)",colnames(all_settings_genus_asv))]
+to_filter <- (rowSums((all_settings_genus_asv_mock[,-which(names(all_settings_genus_asv_mock) == "ASV")])>0))>0
+all_settings_genus_asv_mock <- all_settings_genus_asv_mock[to_filter,]
+all_settings_genus_taxa_mock <- all_settings_genus_taxa[to_filter,]
+
+# BRAY CURTIS
+mock_b_dist <- as.data.frame(as.matrix(vegdist(t(all_settings_genus_asv_mock[,-which(names(all_settings_genus_asv_mock) == "ASV")])), method="bray"))
+samples <- rownames(mock_b_dist)
+mock_b_dist <- as.data.frame(mock_b_dist[,"S1 Mock.Reference"])
+rownames(mock_b_dist) <- samples
+colnames(mock_b_dist) <- "bray_curtis"
+
+all_settings_genus_mock_object <- construct_phyloseq(all_settings_genus_asv_mock, all_settings_genus_taxa_mock)
+all_settings_genus_mock_object_deblur <- all_settings_genus_mock_object
+
+# ORDINATION
+ord_b <- ordinate(all_settings_genus_mock_object, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_mock_object@otu_table))
+data_for_pca_bray["Setting"] <- substring(rownames(data_for_pca_bray),1,3)
+data_for_pca_bray["sample"] <- regmatches(rownames(data_for_pca_bray), regexpr("(Mock)|(Mock.Reference)", rownames(data_for_pca_bray)))
+data_for_pca_bray[data_for_pca_bray$sample=="Mock.Reference","sample"] <- "ZYMO REFERENCE"
+data_for_pca_bray[data_for_pca_bray$sample=="ZYMO REFERENCE","Setting"] <- "ZYMO REFERENCE"
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= Setting)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis") 
+```
+
+##### Bray Curtis distribution - boxplot
+
+```{r}
+rownames(mock_b_dist)[23] <- "ZYMO REFERENCE"
+mock_b_dist["Setting"] <- data_for_pca_bray$Setting
+mock_b_dist_deblur <- mock_b_dist
+
+ggplot(data=mock_b_dist,aes(x=Setting, y=bray_curtis, fill=Setting)) + 
+  geom_boxplot() + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+```
+
+##### Bray Curtis distances - heatmap
+
+The heatmap visualizes the same information as the boxplot, but for each sample separately for a more detailed overview.
+
+```{r}
+mock_b_dist_settings <- data.frame(
+  row.names = unique(regmatches(rownames(mock_b_dist), regexpr("Mock\\d+_\\d+", rownames(mock_b_dist)))),
+  `SETTING 1` = mock_b_dist[grep("S1 ",rownames(mock_b_dist)),"bray_curtis"],
+  `SETTING 2` = mock_b_dist[grep("S2 ",rownames(mock_b_dist)),"bray_curtis"],
+  `SETTING 4` = mock_b_dist[grep("S4 ",rownames(mock_b_dist)),"bray_curtis"],
+  `SETTING 5` = mock_b_dist[grep("S5 ",rownames(mock_b_dist)),"bray_curtis"],
+  `SETTING 6` = mock_b_dist[grep("S6 ",rownames(mock_b_dist)),"bray_curtis"],
+  `SETTING 8` = mock_b_dist[grep("S6 ",rownames(mock_b_dist)),"bray_curtis"])
+
+mock_b_dist_settings_deblur <- mock_b_dist_settings
+
+```
+
+```{r}
+annotation_df <- data.frame(max_diffs = c(2,2,3,2,2,2),fastq_minovlen = c(10,12,12,12,12,10),
+                            fastq_trunclen = c(250,350,350,350,400,400),
+                            row.names = paste0("SETTING.",c(1,2,4,5,6,8)))
+
+pheatmap(mock_b_dist_settings,cluster_rows = FALSE, cellheight = 10, annotation_col = annotation_df)
+```
+
+```{r}
+pheatmap(mock_b_dist_settings,cluster_rows = FALSE, cellheight = 10, kmeans_k = 1,annotation_col = annotation_df)
+```
+
+##### Statistical test
+
+```{r}
+print("Kruskal Wallis")
+kruskal.test(bray_curtis ~ Setting, data = mock_b_dist)
+print("Post-hoc")
+dunnTest(bray_curtis ~ Setting,
+              data=mock_b_dist,
+              method="bh")
+```
+
+## Putting the results together
+
+This section combines all results of individual pipelines.
+
+##### Ordination
+
+```{r}
+taxa_reads_table_dada2 <- merge(all_settings_genus_mock_object_dada2@tax_table,all_settings_genus_mock_object_dada2@otu_table, by='row.names', all=TRUE)
+colnames(taxa_reads_table_dada2)[8:ncol(taxa_reads_table_dada2)] <- paste("DADA2", colnames(taxa_reads_table_dada2)[8:ncol(taxa_reads_table_dada2)])
+
+taxa_reads_table_vsearch <- merge(all_settings_genus_mock_object_vsearch@tax_table,all_settings_genus_mock_object_vsearch@otu_table, by='row.names', all=TRUE)
+colnames(taxa_reads_table_vsearch)[8:ncol(taxa_reads_table_vsearch)] <- paste("VSEARCH", colnames(taxa_reads_table_vsearch)[8:ncol(taxa_reads_table_vsearch)])
+
+taxa_reads_table_deblur <- merge(all_settings_genus_mock_object_deblur@tax_table,all_settings_genus_mock_object_deblur@otu_table, by='row.names', all=TRUE)
+colnames(taxa_reads_table_deblur) <- gsub(pattern = "-",replacement = "_",x = colnames(taxa_reads_table_deblur))
+colnames(taxa_reads_table_deblur)[8:ncol(taxa_reads_table_deblur)] <- paste("DEBLUR", colnames(taxa_reads_table_deblur)[8:ncol(taxa_reads_table_deblur)])
+
+all_settings_genus_mock_all <- merge(taxa_reads_table_dada2[,-1],taxa_reads_table_vsearch[,-1], all=TRUE)
+all_settings_genus_mock_all <- merge(all_settings_genus_mock_all,taxa_reads_table_deblur[,-1], all=TRUE)
+
+all_settings_genus_mock_all[is.na(all_settings_genus_mock_all)] <- 0
+all_settings_genus_mock_all <- all_settings_genus_mock_all[,-which(names(all_settings_genus_mock_all) == "DEBLUR S1 Mock.Reference")]
+all_settings_genus_mock_all <- all_settings_genus_mock_all[,-which(names(all_settings_genus_mock_all) == "VSEARCH S1 Mock.Reference")]
+names(all_settings_genus_mock_all)[which(names(all_settings_genus_mock_all) == "DADA2 S1 Mock.Reference")] <- "ZYMO REFERENCE"
+
+#phyloseq object
+all_settings_genus_asv_all <- all_settings_genus_mock_all[,7:ncol(all_settings_genus_mock_all)]
+all_settings_genus_asv_all["ASV"] <- paste("ASV",1:nrow(all_settings_genus_asv_all))
+all_settings_genus_taxa_all <- all_settings_genus_mock_all[,1:6]
+all_settings_genus_taxa_all["ASV"] <- paste("ASV",1:nrow(all_settings_genus_taxa_all))
+all_settings_genus_object_all <- construct_phyloseq(all_settings_genus_asv_all, all_settings_genus_taxa_all)
+
+ord_b <- ordinate(all_settings_genus_object_all, method = "PCoA", distance = "bray")
+data_for_pca_bray <- as.data.frame(t(all_settings_genus_object_all@otu_table))
+data_for_pca_bray["Setting"] <- regmatches(rownames(data_for_pca_bray), regexpr("(((DADA2)|(DEBLUR)|(VSEARCH)) S\\d+)|(ZYMO REFERENCE)", rownames(data_for_pca_bray)))
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_bray, aes(x=pca_bray[,1],y=pca_bray[,2], col= Setting)) +
+  geom_point(show.legend =TRUE) +
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() +
+  labs(title="PCoA on Bray-Curtis") +  scale_color_manual(values=c(
+    "#1E75B0", "#ABC3E3", "#FA7D0E","#FAB776",
+    "#2B9D2B", "#D90368", "#D22627","#FA9593",
+    "#9165B9", "#FAF33E", "#89544A","#C09991",
+    "#DF75BE", "#F2B2CE", "#7D7D7D","#C3C3C3",
+    "#B8B921", "#D7D78A", "#17BACB","#9BD6E1",
+    "#FFD131", "#F4AC32", "#DBB3B1","#A5BE00",
+    "#3D52D5", "#FFEEDD","#1EFC1E","#C1ADD1",
+    "#95DB87","#000000","#89544A"))
+
+```
+
+### Bray Curtis distribution - boxplot
+
+```{r}
+
+mock_b_dist_dada2["Setting"] <- paste("DADA2",mock_b_dist_dada2$Setting)
+mock_b_dist_vsearch["Setting"] <- paste("VSEARCH",mock_b_dist_vsearch$Setting)
+mock_b_dist_deblur["Setting"] <-  paste("DEBLUR",mock_b_dist_deblur$Setting)
+
+mock_b_dist_vsearch <- mock_b_dist_vsearch[-which(rownames(mock_b_dist_vsearch) == "ZYMO REFERENCE"),]
+mock_b_dist_deblur <- mock_b_dist_deblur[-which(rownames(mock_b_dist_deblur) == "ZYMO REFERENCE"),]
+
+mock_b_dist_all <- rbind(mock_b_dist_dada2,mock_b_dist_vsearch)
+mock_b_dist_all <- rbind(mock_b_dist_all,mock_b_dist_deblur)
+mock_b_dist_all <- mock_b_dist_all[!(mock_b_dist_all$Setting == "DEBLURS5"),]
+
+mock_b_dist_all[which(rownames(mock_b_dist_all) == "ZYMO REFERENCE"),"Setting"] <- "ZYMO REFERENCE"
+ ggplot(data=mock_b_dist_all,aes(x=Setting, y=bray_curtis, fill=Setting)) +
+  geom_boxplot()  +  scale_fill_manual(values=c(
+    "#1E75B0", "#ABC3E3", "#FA7D0E","#FAB776",
+    "#2B9D2B", "#D90368", "#D22627","#FA9593",
+    "#9165B9", "#FAF33E", "#89544A","#C09991",
+    "#DF75BE", "#F2B2CE", "#7D7D7D","#C3C3C3",
+    "#B8B921", "#D7D78A", "#17BACB","#9BD6E1",
+    "#FFD131", "#F4AC32", "#DBB3B1","#A5BE00",
+    "#3D52D5", "#FFEEDD","#1EFC1E","#C1ADD1",
+    "#95DB87","#000000","#89544A")) + scale_x_discrete(guide = guide_axis(angle = 90))  +theme_bw() + theme(legend.position = "none") + ylab(label = "BRAY-CURTIS DISTANCE") +  xlab(label = "SETTING") 
+
+```
+
+### Bray Curtis distances - heatmap
+
+```{r}
+colnames(mock_b_dist_settings_dada2) <- paste("DADA2",colnames(mock_b_dist_settings_dada2))
+colnames(mock_b_dist_settings_vsearch) <- paste("VSEARCH",colnames(mock_b_dist_settings_vsearch))
+colnames(mock_b_dist_settings_deblur) <- paste("DEBLUR",colnames(mock_b_dist_settings_deblur))
+rownames(mock_b_dist_settings_deblur) <- gsub("-","_",rownames(mock_b_dist_settings_deblur))
+
+mock_b_dist_settings_all <- cbind(mock_b_dist_settings_dada2,mock_b_dist_settings_vsearch)
+mock_b_dist_settings_all <- cbind(mock_b_dist_settings_all,mock_b_dist_settings_deblur)
+
+colnames(mock_b_dist_settings_all) <- gsub("ETTING[.]","",colnames(mock_b_dist_settings_all))
+pheatmap(mock_b_dist_settings_all,cluster_rows = FALSE, cellheight = 10, angle_col = 90)
+```
+
+```{r}
+pheatmap(mock_b_dist_settings_all,cluster_rows = FALSE, cellheight = 10, kmeans_k = 1)
+```
+
+### Performance
+
+Here the average performance (precision, recall and F1 score) for each pipeline is plotted.
+
+```{r}
+colnames(performance_mat) <- c("Precision", "Recall")
+rownames(performance_mat) <- c(paste0("DADA2 S",1:14),paste0("VSEARCH S",1:9),paste0("DEBLUR S", c(1,2,4,5,6,8)))
+performance_mat["Pipeline"] <- rownames(performance_mat) 
+```
+
+```{r}
+ggplot(performance_mat, aes(x=reorder(Pipeline,Precision), y=Precision, fill="steelblue")) +
+  geom_bar(stat="identity",fill="steelblue")+theme_bw() + scale_x_discrete(guide = guide_axis(angle = 90))  +theme_bw() + theme(legend.position = "none") + 
+  xlab("Pipeline")
+```
+
+```{r}
+ggplot(performance_mat, aes(x=reorder(Pipeline,Recall), y=Recall, fill="steelblue")) +
+  geom_bar(stat="identity",fill="steelblue")+theme_bw() + scale_x_discrete(guide = guide_axis(angle = 90))  +theme_bw() + theme(legend.position = "none") + 
+  xlab("Pipeline")
+```
+
+```{r}
+performance_mat$F1 <- (2*performance_mat$Precision*performance_mat$Recall)/(performance_mat$Precision + performance_mat$Recall)
+long_df <- melt(performance_mat)
+
+wide_width <- 0.9
+thin_width <- 0.0
+
+# Create the plot
+ggplot(long_df, aes(x = Pipeline, y = value, fill = variable)) +
+  geom_bar(data = subset(long_df, variable == "F1"),
+           aes(y = value),
+           stat = "identity",
+           position = position_dodge(width = wide_width),
+           fill = "gray") + 
+  geom_bar(data = subset(long_df, variable != "F1"),
+           aes(fill = variable, y = value),
+           stat = "identity",
+           position = position_dodge(width = thin_width)) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  xlab("Pipeline") + ylab("Value") +  labs(fill = "Variable Type") + theme(legend.position="bottom")
+```
+
+The best pipelines are selected according to the criteria:
+
+-   PRECISION \>0.95,
+-   RECALL \>0.75
+-   MEDIAN BRAY CURTIS \<0.4
+
+```{r}
+performance_mat[performance_mat$Precision>0.95 &performance_mat$Recall > 0.75,]
+best_pipelines <- performance_mat[performance_mat$Precision>0.95 &performance_mat$Recall > 0.75,"Pipeline"]
+bray_best_pipelines <- c()
+mock_b_dist_all$Setting <- gsub(" ","",mock_b_dist_all$Setting)
+best_pipelines <- gsub(" ","",best_pipelines)
+for (pipeline in best_pipelines){
+
+  bray_best_pipelines <- c(bray_best_pipelines,median(mock_b_dist_all[grep(paste0(pipeline,"$"),mock_b_dist_all$Setting),"bray_curtis"]))
+}
+best_pipelines[bray_best_pipelines<0.4]
+```
+
+### Statistical testing
+
+FInally, a significant difference between the Bray-Curtis distances of tested pipelines was observed (P\<0.001), with 226 of 406 pairs of pipelines being significant in post-hoc testing at the significance level of 0.05.
+
+```{r}
+# kruskal wallis
+kruskal.test(bray_curtis ~ Setting, data = mock_b_dist_all[-which(rownames(mock_b_dist_all)=="ZYMO REFERENCE"),])
+pt <- dunnTest(bray_curtis ~ Setting,data = mock_b_dist_all[-which(rownames(mock_b_dist_all)=="ZYMO REFERENCE"),],
+              method="bh")
+pt$res
+pt$res[pt$res$P.adj <0.05,]
+
+```
+
+```{r}
+# Create a square matrix to store the adjusted p-values
+num_groups <- length(unique(mock_b_dist_all$Setting)) - 1
+result_matrix <- matrix(NA, nrow = num_groups, ncol = num_groups,
+                        dimnames = list(gsub(" ","",(unique(mock_b_dist_all[-which(rownames(mock_b_dist_all)=="ZYMO REFERENCE"),]$Setting))), gsub(" ","",(unique(mock_b_dist_all[-which(rownames(mock_b_dist_all)=="ZYMO REFERENCE"),]$Setting)))))
+
+adjusted_p_values <- pt$res$P.adj
+comparison_pairs <- pt$res$Comparison
+# Populate the matrix with adjusted p-values
+for (i in 1:length(comparison_pairs)) {
+  pair <- strsplit(comparison_pairs[i], "-")[[1]]
+  group1 <- gsub(" ","",pair[1])
+  group2 <- gsub(" ","",pair[2])
+  result_matrix[group1, group2] <- adjusted_p_values[i]
+  result_matrix[group2, group1] <- adjusted_p_values[i]
+}
+
+```
+
+#### Heatmap of significant difference
+
+Heatmap visualizes pairs between which there was a significant difference (red there was no difference, blue there was a difference).
+
+```{r}
+heatmap_df <- result_matrix
+heatmap_df[(result_matrix<0.05) & (result_matrix>0.01)] <- 0.5
+heatmap_df[(result_matrix<=0.01)] <- 0.01
+heatmap_df[(result_matrix>=0.05)] <- 1
+
+pheatmap(heatmap_df,cluster_rows = FALSE, cellheight = 10, cluster_cols = FALSE)
+```

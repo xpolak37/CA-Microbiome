@@ -1,0 +1,2550 @@
+---
+title: Comparative Analysis of Diverse Bioinformatics Pipeline Configurations based on Mock Communities and Biopsy samples (Part 2)
+author: Petra Polakovičová
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Packages and custom functions
+
+```{r}
+# PACKAGES
+suppressWarnings(suppressMessages({
+library(reshape2)
+library("phyloseq")
+library("ggplot2")      
+library("dplyr")        
+library(tibble)
+library(vegan)
+library(compositions)
+library(openxlsx)
+library(DECIPHER)
+library(pheatmap)
+library("biomformat")
+library(Biostrings)
+library(decontam)
+library(microDecon)
+library(FSA)
+library(ggpubr)
+library(ggfortify)
+library(eulerr)
+library(microbiome)
+}))
+```
+
+```{r}
+normalization <- function(phyloseq_object){
+  # normalization of phyloseq object
+  phyloseq_object_n <- phyloseq_object
+  asv_norm <- phyloseq_object_n@otu_table
+  taxa_norm <- phyloseq_object_n@tax_table
+  sums <- colSums(asv_norm[,])
+  
+  for (i in 1:length(sums)) {
+    asv_norm[,i] <- asv_norm[,i]/sums[i]
+  }
+  where <- rowSums(asv_norm) !=0
+  asv_norm <- asv_norm[where,]
+  taxa_norm <- taxa_norm[where,]
+  phyloseq_object_n@otu_table <- asv_norm
+  phyloseq_object_n@tax_table <- taxa_norm
+  return(phyloseq_object_n)
+}
+normalization2 <- function(taxa_reads_table){
+  # normalization of dataframe
+  taxa_reads_table_n <- taxa_reads_table
+  asv_norm <- taxa_reads_table_n[,7:ncol(taxa_reads_table_n)]
+  sums <- colSums(asv_norm[,])
+  
+  for (i in 1:length(sums)) {
+    asv_norm[,i] <- asv_norm[,i]/sums[i]
+  }
+  where <- rowSums(asv_norm) !=0
+  asv_norm <- asv_norm[where,]
+  taxa_reads_table_n <- taxa_reads_table_n[where,]
+  taxa_reads_table_n[,7:ncol(taxa_reads_table_n)] <- asv_norm
+  return(taxa_reads_table_n)
+}
+
+abundance_filtering <- function(phyloseq_object, to_filter= 0.01){
+  # abundance filtering of phyloseq object
+  phyloseq_object_n <- normalization(phyloseq_object)
+  filtering <- filter_taxa(phyloseq_object_n, function(x) sum(x > to_filter)>0 , FALSE)
+  phyloseq_object@otu_table <- phyloseq_object@otu_table[filtering,]
+  phyloseq_object@tax_table <- phyloseq_object@tax_table[filtering,]
+  return(phyloseq_object)
+}
+
+mock_zymo_genus_merging <- function(taxa_table,asv_table,zymo_genus){
+  # merging mock community samples with reference abundance
+  taxa_table[is.na(taxa_table)] <- "unassigned"
+  taxa_reads_table <- merge(taxa_table,asv_table, by="ASV", all=TRUE)
+  groups <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  columns <- names(taxa_reads_table)[9:ncol(taxa_reads_table)] # names of columns with samples
+  grouped_genus <- taxa_reads_table %>%
+          group_by_at(groups[1:6]) %>%
+          summarise(across(columns, sum))
+  mock_genus_n <- normalization2(grouped_genus)
+  to_filter <- (rowSums((mock_genus_n[,7:ncol(mock_genus_n)])>0.01))>0
+  mock_genus_n <- mock_genus_n[to_filter,]
+  mock_zymo_genus <- merge(mock_genus_n,zymo_genus, all=TRUE)
+  mock_zymo_genus[is.na(mock_zymo_genus)] <- 0
+  return(mock_zymo_genus)
+}
+
+genus_merging <- function(taxa_table,asv_table){
+  # merging taxonomy and filtering
+  taxa_table[is.na(taxa_table)] <- "unassigned"
+  taxa_reads_table <- merge(taxa_table,asv_table, by="ASV", all=TRUE)
+  groups <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  columns <- names(taxa_reads_table)[9:ncol(taxa_reads_table)] # names of columns with samples
+  grouped_genus <- taxa_reads_table %>%
+          group_by_at(groups[1:6]) %>%
+          summarise(across(columns, sum))
+  
+  asv_table <- grouped_genus[,7:ncol(grouped_genus)]
+  asv_table["ASV"] <- paste0("GENUS", 1:nrow(asv_table))
+  
+  taxa_table <- grouped_genus[,1:6]
+  taxa_table["ASV"] <- paste0("GENUS", 1:nrow(taxa_table))
+  
+  # Step 1: Calculate abundance of each ASV within each sample
+  abundance <- asv_table[, -which(colnames(asv_table)=="ASV")] / colSums(asv_table[,-which(colnames(asv_table)=="ASV")]) * 100
+  
+  # Step 2: Calculate prevalence of each ASV across all samples
+  prevalence <- rowSums(abundance > 0) / ncol(abundance) * 100
+
+  # Step 3: Filter out ASVs that are very low abundant and very low prevalent
+  threshold_abundance <- 0.01  # Abundance threshold (0.01%)
+  threshold_prevalence <- 10    # Prevalence threshold (10%)
+  
+  # Filter ASVs based on abundance and prevalence
+  to_filter <- rowSums(abundance >= threshold_abundance) > 0 & prevalence >= threshold_prevalence
+  asv_table <- asv_table[to_filter, ]
+  taxa_table <- taxa_table[to_filter,]
+  
+  # Output filtered ASV table
+  return(list(asv_table,taxa_table))
+}
+
+construct_phyloseq <- function(asv_table, taxa_table){
+  # construct phyloseq object - for mock communities (without metadata)
+  otu_mat <- asv_table
+  tax_mat <- taxa_table
+  
+  rownames(otu_mat) <- 1:nrow(otu_mat)
+  rownames(tax_mat) <- 1:nrow(tax_mat)
+  
+  otu_mat <- otu_mat %>%
+    tibble::column_to_rownames("ASV") 
+  tax_mat <- tax_mat %>% 
+    tibble::column_to_rownames("ASV")
+  
+  otu_mat <- as.matrix(otu_mat)
+  tax_mat <- as.matrix(tax_mat)
+  
+  OTU = otu_table(otu_mat, taxa_are_rows = TRUE)
+  TAX = tax_table(tax_mat) 
+  
+  object <- phyloseq(OTU, TAX)
+  return(object)
+}
+construct_phyloseq_real <- function(asv_table, taxa_table, metadata){
+  # construct phyloseq obect - for biopsy samples (with metadata)
+  otu_mat <- asv_table
+  tax_mat <- taxa_table
+  samples_df <- metadata
+  
+  rownames(otu_mat) <- 1:nrow(otu_mat)
+  rownames(tax_mat) <- 1:nrow(tax_mat)
+  
+  otu_mat <- otu_mat %>%
+    tibble::column_to_rownames("ASV") 
+  tax_mat <- tax_mat %>% 
+    tibble::column_to_rownames("ASV")
+  samples_df <- samples_df %>% 
+  tibble::column_to_rownames("SampleID") 
+  
+  otu_mat <- as.matrix(otu_mat)
+  tax_mat <- as.matrix(tax_mat)
+  
+  
+  OTU = otu_table(otu_mat, taxa_are_rows = TRUE)
+  TAX = tax_table(tax_mat) 
+  samples = sample_data(samples_df)
+  
+  object <- phyloseq(OTU, TAX, samples)
+  return(object)
+}
+
+read_counts <- function(asv_table,input_numbers){
+  # function for visualizing the read counts (input vs retained)
+  counts <- as.data.frame(colSums(asv_table[,- grep("ASV",colnames(asv_table))]))
+  colnames(counts) <- "Count"
+  counts["Sample"] <- gsub("-","_",rownames(counts))
+  rownames(counts) <- counts$Sample
+  counts <- merge(counts,input_numbers,by='row.names',all=TRUE)
+  counts %>%
+    ggplot() +
+    geom_col( aes(x=reorder(Sample,input), y=input), alpha=.8, width=1, show.legend = TRUE,fill="#a5cee3") +
+    geom_text(aes(x=reorder(Sample,input), y=input,label = input), size = 3, hjust = -0.2) + 
+    geom_col( aes(x=reorder(Sample,Count), y=Count), alpha=.8, width=0.5, show.legend = TRUE,fill="#e3211c") +
+    geom_text(aes(x=reorder(Sample,Count), y=Count,label = Count), size = 3, hjust = -0.1,color="#e32000") + 
+    scale_fill_brewer(palette = "Set2") +
+    coord_flip() +
+    xlab("") +
+    labs(y = "Number of reads") + 
+    theme(legend.position='none') +
+    theme_bw() 
+}
+
+precision <- function(ps_object_filt, zymo_taxa){
+  # calculating precision
+  asv_filt <- as.data.frame(ps_object_filt@otu_table)
+  asv_filt <- asv_filt[,grep("Mock",colnames(asv_filt))]
+  asv_filt <- asv_filt[rowSums(asv_filt)>0,]
+  taxa_filt <- as.data.frame(ps_object_filt@tax_table)
+  taxa_filt <- taxa_filt[rownames(asv_filt),]
+  zymo_taxa <- zymo_taxa[nchar(zymo_taxa$Genus)>0,"Genus"]
+  precs <- c()
+  for (c in 1:ncol(asv_filt)){
+    taxa_sample <- taxa_filt[rownames(asv_filt)[(asv_filt[,colnames(asv_filt)[c]]>0)],"Genus"]
+    taxa_sample <- taxa_sample[!is.na(taxa_sample)]
+    tp <- sum(taxa_sample %in% zymo_taxa)
+    fp <- sum(!(taxa_sample %in% zymo_taxa))
+    prec = tp/(tp + fp)
+    precs <- c(precs,prec)
+  }
+  return(mean(precs))
+}
+
+recall <- function(ps_object_filt, zymo_taxa){
+  # calculating recall
+  asv_filt <- as.data.frame(ps_object_filt@otu_table)
+  asv_filt <- asv_filt[,grep("Mock",colnames(asv_filt))]
+  asv_filt <- asv_filt[rowSums(asv_filt)>0,]
+  taxa_filt <- as.data.frame(ps_object_filt@tax_table)
+  taxa_filt <- taxa_filt[rownames(asv_filt),]
+  zymo_taxa <- zymo_taxa[nchar(zymo_taxa$Genus)>0,"Genus"]
+  recs <- c()
+  for (c in 1:ncol(asv_filt)){
+    taxa_sample <- taxa_filt[rownames(asv_filt)[(asv_filt[,colnames(asv_filt)[c]]>0)],"Genus"]
+    taxa_sample <- taxa_sample[!is.na(taxa_sample)]
+    tp <- sum(taxa_sample %in% zymo_taxa)
+    fn <- sum(!(zymo_taxa %in% taxa_sample))
+    rec = tp/(tp+fn)
+    recs <- c(recs,rec)
+  }
+  return(mean(recs))
+}
+
+```
+
+# Biopsy samples
+
+```{r}
+input_numbers <- read.csv("data/input_reads.csv", sep=",", row.names = 1)
+rownames(input_numbers) <- regmatches(rownames(input_numbers), regexpr("(run\\d+_\\d+)", rownames(input_numbers)))
+```
+
+```{r}
+metadata <- read.csv("data/metadata.csv")
+```
+
+## DADA2
+
+### Setting 1
+
+```{r}
+asv_table <- read.csv("data/results_dada2/1/final_seqtab_1.csv")
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_dada2/1/taxa_1.csv", sep="\t", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_dadas1_object <- genus_object
+```
+
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+p_values_permanova <- c()
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.012
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
+diversity.
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value  = 0.1738
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.1143
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+final_which_genus <- data.frame()
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("DADA S1",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### Setting 12
+
+```{r}
+asv_table <- read.csv("data/results_dada2/12/final_seqtab_12.csv")
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_dada2/12/taxa_12.csv", sep="\t", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_dadas12_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.03
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.2315
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.1826
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("DADA S12",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### Setting 14
+
+```{r}
+asv_table <- read.csv("data/results_dada2/14/final_seqtab_14.csv", row.names = 1)
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_dada2/14/taxa_14.csv", sep=",")
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_dadas14_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.017
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
+diversity.
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =   0.1918
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.1143
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("DADA S14",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### VSEARCH
+
+### DEFAULT
+
+```{r}
+asv_table <- read.csv("data/results_vsearch/default/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("data/results_vsearch/default/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+```
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_vsearchd_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.174
+test_permanova
+
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
+diversity.
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.862
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.5648
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("VSEARCH DEFAULT",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### Setting 6
+
+```{r}
+asv_table <- read.csv("data/results_vsearch/6/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("data/results_vsearch/6/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_vsearchs6_object <- genus_object
+```
+
+ORDINATION
+
+PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.124
+test_permanova
+
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = FALSE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =   0.7381
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =   0.4612
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("VSEARCH S6",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### Setting 9
+
+```{r}
+asv_table <- read.csv("data/results_vsearch/9/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table_vsearch <- read.csv("data/results_vsearch/9/sintax.csv", sep=",", header = FALSE)
+colnames(taxa_table_vsearch) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+taxa_table_vsearch
+
+```
+
+```{r}
+
+taxa_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ taxa_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr(":.+[(]", taxa_table_vsearch[,i]))
+ taxa_table[,i]  <- substring(taxa_table[,i],2,nchar(taxa_table[,i])-1)
+}
+colnames(taxa_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+prob_table <- data.frame(ASV = taxa_table_vsearch$ASV)
+for (i in 2:8){
+ prob_table[,i] <-  regmatches(taxa_table_vsearch[,i], regexpr("[(].+[)]", taxa_table_vsearch[,i]))
+ prob_table[,i]  <- substring(prob_table[,i],2,nchar(prob_table[,i])-1)
+}
+colnames(prob_table) <- c("ASV","Domain","Phylum","Class","Order", "Family","Genus","Species")
+
+# remove assignment with less than 0.7 probability
+taxa_table[prob_table[,]<0.7] <- NA
+taxa_table
+
+
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_vsearchs9_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.247
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.7994
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.7381
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("VSEARCH S9",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+## VSEARCH - IDTAXA
+
+### DEFAULT
+
+```{r}
+asv_table <- read.csv("data/results_vsearch/default/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_vsearch/default/taxa_idtaxa.csv", sep="\t")
+colnames(taxa_table) <- c("ASV",colnames(taxa_table)[-1])
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_vsearchd_idtaxa_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.174
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
+diversity.
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =   0.2211
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.1918
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("VSEARCH DEFAULT IDTAXA",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### Setting 6
+
+```{r}
+asv_table <- read.csv("data/results_vsearch/6/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_vsearch/6/taxa_idtaxa.csv", sep="\t")
+colnames(taxa_table) <- c("ASV",colnames(taxa_table)[-1])
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_vsearchs6_idtaxa_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.124
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = FALSE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
+diversity.
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.1572
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.1738
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("VSEARCH S6 IDTAXA",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+### Setting 9
+
+```{r}
+asv_table <- read.csv("data/results_vsearch/9/all.otutab.csv", sep="\t")
+colnames(asv_table) <- c("ASV",colnames(asv_table)[-1])
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_vsearch/9/taxa_idtaxa.csv", sep="\t")
+colnames(taxa_table) <- c("ASV",colnames(taxa_table)[-1])
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_vsearchs9_idtaxa_object <- genus_object
+```
+
+ORDINATION PERMANOVA revealed a significant difference between groups.
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") # 0.247
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY Mann Whitney showed no significant difference in alpha
+diversity.
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value = 0.2766
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.3141
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("VSEARCH S9 IDTAXA",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+
+```
+
+## Deblur
+
+### DEFAULT
+
+```{r}
+asv_table <- read.csv("data/results_deblur/default/asv_table.csv", sep=",")
+colnames(asv_table) <- gsub("[.]","_",colnames(asv_table))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_deblur/default/taxa_default.csv", sep="\t", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_deblurd_object <- genus_object
+```
+
+ORDINATION
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") #  0.013
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =   0.1918
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =  0.1417
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+if (length(which_genus)>0){
+which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+which_genus["Pipeline"] <- rep("DEBLUR DEFAULT",nrow(which_genus))
+final_which_genus <- rbind(final_which_genus,which_genus)
+}
+```
+
+### Setting 2
+
+```{r}
+asv_table <- read.csv("data/results_deblur/2/asv_table.csv", sep=",")
+colnames(asv_table) <- gsub("[.]","_",colnames(asv_table))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_deblur/2/taxa_2.csv", sep="\t", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_deblurs2_object <- genus_object
+```
+
+ORDINATION
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") #  0.012
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =  p-value =  0.1826
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =  p-value = 0.1493
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+if (length(which_genus)){
+  which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+  which_genus["Pipeline"] <- rep("DEBLUR S2",nrow(which_genus))
+  final_which_genus <- rbind(final_which_genus,which_genus)
+}
+```
+
+### Setting 8
+
+```{r}
+asv_table <- read.csv("data/results_deblur/8/asv_table.csv", sep=",")
+colnames(asv_table) <- gsub("[.]","_",colnames(asv_table))
+asv_table
+```
+
+```{r}
+taxa_table <- read.csv("data/results_deblur/8/taxa_8.csv", sep="\t", row.names = 1)
+taxa_table
+```
+
+READ COUNTS
+
+```{r}
+read_counts(asv_table,input_numbers)
+```
+
+Phyloseq object, filtering
+
+```{r}
+# phyloseq object
+ps_object <- construct_phyloseq(asv_table, taxa_table)
+
+# filtering
+ps_object_filt <- abundance_filtering(ps_object)
+
+#nornalization
+ps_object_n <- normalization(ps_object_filt)
+```
+
+BARPLOT
+
+```{r}
+
+# plot with reference
+p1 <- plot_bar(ps_object_n, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+p2 <- plot_bar(ps_object_filt, fill = "Genus") +
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack") + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  theme(legend.position = "none")
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2)
+```
+
+GENUS
+
+```{r}
+my_list <- genus_merging(taxa_table,asv_table) 
+asv_table <- my_list[[1]]
+taxa_table <- my_list[[2]]
+genus_object <- construct_phyloseq_real(asv_table = asv_table, taxa_table = taxa_table, metadata = metadata)
+genus_deblurs8_object <- genus_object
+```
+
+ORDINATION
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Type"] <- ps_t@sam_data$Type
+
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Type")] ~ Type, data = data_for_pca, method="euclidean") 
+test_permanova
+p_values_permanova <- c(p_values_permanova,test_permanova$`Pr(>F)`[1])
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Type,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+
+```
+
+```{r}
+# bray curtis
+ps_norm <-normalization(genus_object)
+data_for_pca_norm <- as.data.frame(t(ps_norm@otu_table))
+data_for_pca_norm["Type"] <- ps_norm@sam_data$Type
+
+ord_b <- ordinate(ps_norm, method = "PCoA", distance = "bray")
+ord_b_dist <- vegdist(t(as.data.frame(ps_norm@otu_table)), method="bray")
+
+ps_norm_meta <- data.frame(Type = ps_norm@sam_data$Type)
+test_permanova <- adonis2(t(ps_norm@otu_table) ~ Type, data = ps_norm_meta, method="bray") #  0.007
+test_permanova
+
+imp_bray <- ord_b$values$Relative_eig
+pca_bray <- ord_b$vectors
+ggplot(data_for_pca_norm, aes(x=pca_bray[,1],y=pca_bray[,2], color= Type)) +
+  geom_point(show.legend = TRUE) + stat_ellipse() + 
+  xlab(paste("PCo1 ", "(",round(imp_bray[1]*100,2),"%", ")", sep=""))+
+  ylab(paste("PCo2 ", "(",round(imp_bray[2]*100,2),"%", ")", sep=""))+
+  theme_bw() + 
+  labs(title="PCoA on Bray-Curtis")
+```
+
+ALPHA DIVERSITY
+
+```{r}
+alpha_meas = c("Shannon", "InvSimpson")
+richness <- estimate_richness(genus_object, measures = alpha_meas)
+richness["Type"] <- genus_object@sam_data$Type
+p<-plot_richness(genus_object, "Type", "Type", measures=alpha_meas)
+p + geom_boxplot(data=p$sata, aes(x=Type, y=value, color=NULL), alpha=0.1) + 
+  theme_bw() + 
+  scale_x_discrete(guide = guide_axis(angle = 0)) 
+
+wilcox.test(`Shannon` ~ `Type`, data = richness,  paired=FALSE) # p-value =  p-value =  0.2888
+wilcox.test(`InvSimpson` ~ `Type`, data = richness,  paired=FALSE) # p-value =  p-value = 0.211
+```
+
+ALDEX
+
+```{r}
+# ALDEX
+my_data_for <- genus_object@otu_table
+my_metadata <- genus_object@sam_data
+
+library(ALDEx2)
+x.aldex <- aldex(my_data_for, my_metadata$Type, mc.samples=128, test="t", effect=TRUE, 
+                 include.sample.summary=FALSE, verbose=FALSE, paired.test=FALSE)
+
+aldex.plot(x.aldex, type="MA", test="wilcox", xlab="Log-ratio abundance",
+           ylab="Difference", main='MA plot',all.cex=1)
+aldex.plot(x.aldex, type="MW", test="wilcox", xlab="Dispersion",
+           ylab="Difference", main='MW (Effect) plot',all.cex=1)
+aldex.plot(x.aldex, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05)
+diff_asv <- x.aldex[which(x.aldex$we.eBH < 0.05 & x.aldex$wi.eBH <0.05),]
+diff_asv <- row.names(diff_asv)
+if (length(diff_asv)>0){
+  diff_asv <- genus_object@tax_table[diff_asv,]
+}
+diff_asv
+
+x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),]
+which_genus <- rownames(x.aldex[which(x.aldex$we.ep < 0.05 & x.aldex$wi.ep <0.05),])
+if (length(which_genus)){
+  which_genus <-  as.data.frame(genus_object@tax_table[rownames(genus_object@tax_table) %in% which_genus,])
+  which_genus["Pipeline"] <- rep("DEBLUR S8",nrow(which_genus))
+  final_which_genus <- rbind(final_which_genus,which_genus)
+}
+
+```
+
+Significantly different abundant taxa, result table for all pipelines.
+
+```{r}
+final_which_genus
+```
+
+## Comparative analysis
+
+### Putting the results together
+
+```{r}
+
+#DADA2 S1
+sample_names(genus_dadas1_object) <- paste(sample_names(genus_dadas1_object),"DADA2 S1")
+dadas1 <- as.data.frame(genus_dadas1_object@tax_table)
+dadas1_asv <- as.data.frame(genus_dadas1_object@otu_table)
+
+rownames(dadas1) <- apply(dadas1, 1, function(x) paste(x, collapse = "/"))
+rownames(dadas1_asv) <- rownames(dadas1)
+
+#DADA2 S12
+sample_names(genus_dadas12_object) <- paste(sample_names(genus_dadas12_object),"DADA2 S12")
+dadas12 <- as.data.frame(genus_dadas12_object@tax_table)
+dadas12_asv <- as.data.frame(genus_dadas12_object@otu_table)
+
+rownames(dadas12) <- apply(dadas12, 1, function(x) paste(x, collapse = "/"))
+rownames(dadas12_asv) <- rownames(dadas12)
+
+#DADA2 S14
+sample_names(genus_dadas14_object) <- paste(sample_names(genus_dadas14_object),"DADA2 S14")
+dadas14 <- as.data.frame(genus_dadas14_object@tax_table)
+dadas14_asv <- as.data.frame(genus_dadas14_object@otu_table)
+
+rownames(dadas14) <- apply(dadas14, 1, function(x) paste(x, collapse = "/"))
+rownames(dadas14_asv) <- rownames(dadas14)
+
+#VSEARCH DEFAULT
+sample_names(genus_vsearchd_object) <- paste(sample_names(genus_vsearchd_object),"VSEARCH DEFAULT")
+vsearchd <- as.data.frame(genus_vsearchd_object@tax_table)
+vsearchd_asv <- as.data.frame(genus_vsearchd_object@otu_table)
+
+rownames(vsearchd) <- apply(vsearchd, 1, function(x) paste(x, collapse = "/"))
+rownames(vsearchd_asv) <- rownames(vsearchd)
+
+#VSEARCH S6
+sample_names(genus_vsearchs6_object) <- paste(sample_names(genus_vsearchs6_object),"VSEARCH S6")
+vsearchs6 <- as.data.frame(genus_vsearchs6_object@tax_table)
+vsearchs6_asv <- as.data.frame(genus_vsearchs6_object@otu_table)
+
+rownames(vsearchs6) <- apply(vsearchs6, 1, function(x) paste(x, collapse = "/"))
+rownames(vsearchs6_asv) <- rownames(vsearchs6)
+
+#VSEARCH S9
+sample_names(genus_vsearchs9_object) <- paste(sample_names(genus_vsearchs9_object),"VSEARCH S9")
+vsearchs9 <- as.data.frame(genus_vsearchs9_object@tax_table)
+vsearchs9_asv <- as.data.frame(genus_vsearchs9_object@otu_table)
+
+rownames(vsearchs9) <- apply(vsearchs9, 1, function(x) paste(x, collapse = "/"))
+rownames(vsearchs9_asv) <- rownames(vsearchs9)
+
+#VSEARCH DEFAULT IDTAXA
+sample_names(genus_vsearchd_idtaxa_object) <- paste(sample_names(genus_vsearchd_idtaxa_object),"VSEARCH DEFAULT IDTAXA")
+vsearchd_idtaxa <- as.data.frame(genus_vsearchd_idtaxa_object@tax_table)
+vsearchd_idtaxa_asv <- as.data.frame(genus_vsearchd_idtaxa_object@otu_table)
+
+rownames(vsearchd_idtaxa) <- apply(vsearchd_idtaxa, 1, function(x) paste(x, collapse = "/"))
+rownames(vsearchd_idtaxa_asv) <- rownames(vsearchd_idtaxa)
+
+#VSEARCH S6 IDTAXA
+sample_names(genus_vsearchs6_idtaxa_object) <- paste(sample_names(genus_vsearchs6_idtaxa_object),"VSEARCH S6 IDTAXA")
+vsearchs6_idtaxa <- as.data.frame(genus_vsearchs6_idtaxa_object@tax_table)
+vsearchs6_idtaxa_asv <- as.data.frame(genus_vsearchs6_idtaxa_object@otu_table)
+
+rownames(vsearchs6_idtaxa) <- apply(vsearchs6_idtaxa, 1, function(x) paste(x, collapse = "/"))
+rownames(vsearchs6_idtaxa_asv) <- rownames(vsearchs6_idtaxa)
+
+#VSEARCH S9 IDTAXA
+sample_names(genus_vsearchs9_idtaxa_object) <- paste(sample_names(genus_vsearchs9_idtaxa_object),"VSEARCH S9 IDTAXA")
+vsearchs9_idtaxa <- as.data.frame(genus_vsearchs9_idtaxa_object@tax_table)
+vsearchs9_idtaxa_asv <- as.data.frame(genus_vsearchs9_idtaxa_object@otu_table)
+
+rownames(vsearchs9_idtaxa) <- apply(vsearchs9_idtaxa, 1, function(x) paste(x, collapse = "/"))
+rownames(vsearchs9_idtaxa_asv) <- rownames(vsearchs9_idtaxa)
+
+#DEBLUR DEFAULT
+sample_names(genus_deblurd_object) <- paste(sample_names(genus_deblurd_object),"Deblur DEFAULT")
+deblurd <- as.data.frame(genus_deblurd_object@tax_table)
+deblurd_asv <- as.data.frame(genus_deblurd_object@otu_table)
+
+rownames(deblurd) <- apply(deblurd, 1, function(x) paste(x, collapse = "/"))
+rownames(deblurd_asv) <- rownames(deblurd)
+
+#DEBLUR S2
+sample_names(genus_deblurs2_object) <- paste(sample_names(genus_deblurs2_object),"Deblur S2")
+deblurs2 <- as.data.frame(genus_deblurs2_object@tax_table)
+deblurs2_asv <- as.data.frame(genus_deblurs2_object@otu_table)
+
+rownames(deblurs2) <- apply(deblurs2, 1, function(x) paste(x, collapse = "/"))
+rownames(deblurs2_asv) <- rownames(deblurs2)
+
+#DEBLUR S8
+sample_names(genus_deblurs8_object) <- paste(sample_names(genus_deblurs8_object),"Deblur S8")
+deblurs8 <- as.data.frame(genus_deblurs8_object@tax_table)
+deblurs8_asv <- as.data.frame(genus_deblurs8_object@otu_table)
+
+rownames(deblurs8) <- apply(deblurs8, 1, function(x) paste(x, collapse = "/"))
+rownames(deblurs8_asv) <- rownames(deblurs8)
+
+#MERGING
+all_asv <- merge(dadas1_asv,dadas12_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,dadas14_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,vsearchd_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,vsearchs6_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,vsearchs9_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,vsearchd_idtaxa_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,vsearchs6_idtaxa_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,vsearchs9_idtaxa_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,deblurd_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,deblurs2_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv <- merge(all_asv,deblurs8_asv, by='row.names', all=TRUE)
+row.names(all_asv) <- all_asv[,1]
+all_asv <- all_asv[, -1]
+
+all_asv[is.na(all_asv)] <- 0
+all_taxa <- as.data.frame(t(as.data.frame(strsplit(rownames(all_asv),"/"))))
+
+all_asv["ASV"] <- paste0("GENUS",1:nrow(all_asv))
+all_taxa["ASV"] <- paste0("GENUS",1:nrow(all_taxa))
+
+all_metadata <- data.frame(SampleID=colnames(all_asv)[-191],
+                           Pipeline=regmatches(colnames(all_asv), regexpr("(DADA.+)|(VSEARCH.+)|(Deblur.+)", colnames(all_asv))))
+
+all_genus_object <- construct_phyloseq_real(asv_table = all_asv, taxa_table =all_taxa, metadata = all_metadata )
+```
+
+Results of PERMANOVA across pipelines:
+
+```{r}
+p_values_permanova
+```
+
+### Venn diagrams
+
+```{r}
+list_core <- c() # an empty object to store information
+group_list <- unique(all_genus_object@sam_data$Pipeline)
+for (n in group_list){ 
+  ps.sub <- subset_samples(all_genus_object, Pipeline == n) 
+
+  core_m <- core_members(ps.sub, 
+                         detection = 0, 
+                         prevalence = 0)
+  print(paste0("No. of core taxa in ", n, " : ", length(core_m))) 
+  list_core[[n]] <- core_m 
+}
+
+p1 <- plot(venn(list_core[c(1,2,3)]))
+p2 <- plot(venn(list_core[c(4,5,6)]))
+p3 <- plot(venn(list_core[c(7,8,9)]))
+
+ggarrange(p1,p2,p3,
+          labels = c("A", "B","C"),
+          ncol = 3, nrow = 1)
+
+p1 <- plot(venn(list_core[c(1,4,7)]))
+p2 <- plot(venn(list_core[c(2,5,8)]))
+p3 <- plot(venn(list_core[c(3,6,9)]))
+ggarrange(p1,p2,p3,
+          labels = c("A", "B","C"),
+          ncol = 3, nrow = 1)
+
+p1 <- plot(venn(list_core[c(2,3,5,6,8)]))
+p2 <- plot(venn(list_core[c(2,3,5,6,9)]))
+
+ggarrange(p1,p2,
+          labels = c("A", "B"),
+          ncol = 2, nrow = 1)
+
+p1 <- plot(venn(list_core[c(5,6,8,9)]))
+p2<- plot(venn(list_core[c(1,4,7,10)]))
+
+ggarrange(p1,p2,
+          labels = c("A", "B"),
+          ncol = 2, nrow = 1)
+
+```
+
+### Heatmap of mismatches
+
+```{r}
+
+matrix_data <- sapply(list_core, function(x) {
+  sapply(paste("GENUS", 1:194, sep = ""), function(y) as.numeric(y %in% x))
+})
+
+# Convert the matrix to a data frame
+df <- as.data.frame(matrix_data)
+
+pheatmap(df, cluster_rows = TRUE, cluster_cols = TRUE)
+
+print(sum(apply(df,1,sum) == 12)/nrow(df))
+
+where <- c(grep("VSEARCH DEFAULT$",colnames(df)),grep("VSEARCH S6$",colnames(df)),grep("VSEARCH S9$",colnames(df)))
+df2 <- df[!(apply(df,1,sum)==0),-where]
+print(sum(apply(df2,1,sum) == 9)/nrow(df2))
+```
+
+### Ordination
+
+```{r}
+# aitchison
+ps_t <- microbiome::transform(all_genus_object, 'clr')
+data_for_pca <- as.data.frame(t(ps_t@otu_table))
+data_for_pca["Pipeline"] <- ps_t@sam_data$Pipeline
+data_for_pca["Group"] <- my_metadata[regmatches(rownames(data_for_pca), regexpr("run\\d+_\\d+", rownames(data_for_pca))),"Type"]
+ord_clr <- ordinate(ps_t, method = "PCoA", distance = "euclidean")
+
+test_permanova <- adonis2(data_for_pca[,-which(colnames(data_for_pca)=="Pipeline" | colnames(data_for_pca)=="Group")] ~ Pipeline, data = data_for_pca, method="euclidean")
+test_permanova
+
+data_for_pca["Classifier"] <- "IDTAXA"
+data_for_pca[grep("VSEARCH",data_for_pca$Pipeline),"Classifier"] <- "SINTAX"
+data_for_pca[grep("VSEARCH .+ IDTAXA",data_for_pca$Pipeline),"Classifier"] <- "IDTAXA"
+
+pca_res <- prcomp(t(ps_t@otu_table))
+imp <- round(summary(pca_res)$importance[2,]*100,2)
+ggplot(data_for_pca, aes(x=pca_res$x[,1],y=pca_res$x[,2], color= Pipeline, shape=Classifier,show.legend = FALSE)) +
+  geom_point(show.legend = TRUE, size=3) +
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() +  scale_color_manual(values=c(
+    "#1E75B0", "#ABC3E3", "#FA7D0E","#FAB776",
+    "#2B9D2B", "#D90368", "#D22627","#FA9593",
+    "#9165B9", "#FAF33E", 
+    "#DF75BE", "#F2B2CE"))
+
+```
+
+```{r}
+ggplot(data_for_pca, aes(x=pca_res$x[,2],y=pca_res$x[,3], color= Group, show.legend = FALSE)) +
+  geom_point(show.legend = TRUE, size=3) +
+  xlab(paste("PC1 ", "(",imp[1],"%", ")", sep=""))+
+  ylab(paste("PC2 ", "(",imp[2],"%", ")", sep="")) + 
+  theme_bw() + 
+  labs(title="PCA on clr-transformed data") 
+```
