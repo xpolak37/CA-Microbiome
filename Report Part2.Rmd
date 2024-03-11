@@ -772,7 +772,7 @@ final_which_genus <- rbind(final_which_genus,which_genus)
 
 ```
 
-### VSEARCH
+## VSEARCH
 
 ### DEFAULT
 
@@ -2500,7 +2500,17 @@ Results of PERMANOVA across pipelines:
 p_values_permanova
 ```
 
+The alpha and beta diversity measures in PSC and control samples
+assessed according to data obtained from different pipelines were
+similar. The Shannon index showed no significant difference between the
+PSC and AUD samples. However, PERMANOVA revealed significant differences
+between these two groups, except with the Deblur pipeline set to default
+settings, where the PERMANOVA was not significant (P=0.052).
+
 ### Venn diagrams
+
+The Venn diagram depicts how dissimilar the default settings of
+individual pipelines were.
 
 ```{r}
 list_core <- c() # an empty object to store information
@@ -2548,6 +2558,11 @@ ggarrange(p1,p2,
 
 ### Heatmap of mismatches
 
+Heatmap visualizes genera that was detected by individual pipelines.
+Only 47.94% of the revealed genera were common acrossall 12 tested
+pipelines, and 56.70% were common among pipelines that employed the same
+classifier.
+
 ```{r}
 
 matrix_data <- sapply(list_core, function(x) {
@@ -2557,7 +2572,7 @@ matrix_data <- sapply(list_core, function(x) {
 # Convert the matrix to a data frame
 df <- as.data.frame(matrix_data)
 
-pheatmap(df, cluster_rows = TRUE, cluster_cols = FALSE)
+pheatmap(df, cluster_rows = TRUE, cluster_cols = FALSE,show_rownames = FALSE)
 
 print(sum(apply(df,1,sum) == 12)/nrow(df))
 
@@ -2567,6 +2582,12 @@ print(sum(apply(df2,1,sum) == 9)/nrow(df2))
 ```
 
 ### Ordination
+
+The comparative analysis of biopsy samples revealed that the biggest
+difference among the compared pipelines was introduced by the taxonomic
+classifier. As observed in the PCA analysis, an apparent cluster of
+samples was present for the pipeline that utilized the SINTAX taxonomic
+classifier.
 
 ```{r}
 # aitchison

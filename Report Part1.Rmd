@@ -82,8 +82,6 @@ library(DECIPHER)
 library(pheatmap)
 library("biomformat")
 library(Biostrings)
-library(decontam)
-library(microDecon)
 library(FSA)
 library(ggpubr)
 library(ggfortify)
@@ -344,6 +342,8 @@ zymo_genus <- zymo_taxa_reads_table %>%
         group_by_at(groups[1:6]) %>%
         summarise(across(columns, sum))
 ```
+
+# Analysis
 
 ## DADA2
 
