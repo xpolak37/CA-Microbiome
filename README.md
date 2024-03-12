@@ -10,6 +10,12 @@ This study is based on data from the research on the pathology of primary sclero
 In addition, mock community samples (ZymoBIOMICS Microbial Community DNA Standard) were used as internal standards. A dataset of 62 samples was created, comprising 22 internal standards, 20 cecum biopsy samples from patients who underwent liver transplantation for PSC and did not develop recurrence and 20 control samples of cecum biopsy of patients who underwent liver transplantation due to alcohol use disorder (AUD).
 
 ## Report
-The report is divided into 2 parts. Part 1 refers to the mock community analysis alongside with negative control samples, to check to what degree there is contamination in individual libraries.
-Part 2 refers to the analysis of real biopsy samples.
+The report is divided into 2 parts. 
 
+### Part 1
+Part 1 refers to the mock community analysis alongside with negative control samples, to check to what degree there is contamination in individual libraries.
+Report Part 1 is available at: https://xpolak37.github.io/CA-Microbiome/Report%20Part1.html
+
+### Part 2
+Part 2 refers to the analysis of real biopsy samples.
+Report Part 2 is available at: https://xpolak37.github.io/CA-Microbiome/Report%20Part2.html
