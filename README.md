@@ -14,8 +14,10 @@ The report is divided into 2 parts.
 
 ### Part 1
 Part 1 refers to the mock community analysis alongside with negative control samples, to check to what degree there is contamination in individual libraries.
+
 Report Part 1 is available at: https://xpolak37.github.io/CA-Microbiome/Report%20Part1.html
 
 ### Part 2
 Part 2 refers to the analysis of real biopsy samples.
+
 Report Part 2 is available at: https://xpolak37.github.io/CA-Microbiome/Report%20Part2.html
